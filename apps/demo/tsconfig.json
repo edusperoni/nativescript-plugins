@@ -10,7 +10,7 @@
       "~/*": [
         "src/*"
       ],
-      "@nativescript/*": [
+      "@edusperoni/*": [
         "../../packages/*"
       ],
       "@demo/shared": [

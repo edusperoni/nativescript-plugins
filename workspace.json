@@ -78,14 +78,16 @@
       "projectType": "application",
       "targets": {
         "build": {
+          "executor": "@nrwl/workspace:run-commands",
           "outputs": [
             "dist/packages"
           ],
           "options": {
-            "commands": [],
+            "commands": [
+              "nx run nativescript-sms-inbox:build.all"
+            ],
             "parallel": false
-          },
-          "executor": "@nrwl/workspace:run-commands"
+          }
         },
         "focus": {
           "outputs": [
@@ -101,6 +103,51 @@
         }
       },
       "sourceRoot": ""
+    },
+    "nativescript-sms-inbox": {
+      "root": "packages/nativescript-sms-inbox",
+      "projectType": "library",
+      "sourceRoot": "packages/nativescript-sms-inbox",
+      "targets": {
+        "build": {
+          "executor": "@nrwl/node:package",
+          "options": {
+            "outputPath": "dist/packages/nativescript-sms-inbox",
+            "tsConfig": "packages/nativescript-sms-inbox/tsconfig.json",
+            "packageJson": "packages/nativescript-sms-inbox/package.json",
+            "main": "packages/nativescript-sms-inbox/index.d.ts",
+            "assets": [
+              "packages/nativescript-sms-inbox/*.md",
+              "packages/nativescript-sms-inbox/index.d.ts",
+              "LICENSE",
+              {
+                "glob": "**/*",
+                "input": "packages/nativescript-sms-inbox/platforms/",
+                "output": "./platforms/"
+              }
+            ]
+          }
+        },
+        "build.all": {
+          "executor": "@nrwl/workspace:run-commands",
+          "options": {
+            "commands": [
+              "nx run nativescript-sms-inbox:build",
+              "node tools/scripts/build-finish.ts nativescript-sms-inbox"
+            ],
+            "parallel": false
+          }
+        },
+        "focus": {
+          "executor": "@nrwl/workspace:run-commands",
+          "options": {
+            "commands": [
+              "nx g @nativescript/plugin-tools:focus-packages nativescript-sms-inbox"
+            ],
+            "parallel": false
+          }
+        }
+      }
     }
   },
   "cli": {

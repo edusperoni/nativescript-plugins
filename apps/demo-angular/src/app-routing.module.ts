@@ -6,7 +6,8 @@ import { HomeComponent } from './home.component';
 
 const routes: Routes = [
    { path: '', redirectTo: '/home', pathMatch: 'full' },
-   { path: 'home', component: HomeComponent }
+   { path: 'home', component: HomeComponent },
+	{ path: 'nativescript-sms-inbox', loadChildren: () => import('./plugin-demos/nativescript-sms-inbox.module').then(m => m.NativescriptSmsInboxModule) }
 ];
 
 @NgModule({

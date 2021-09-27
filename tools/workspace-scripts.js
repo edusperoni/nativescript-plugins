@@ -57,12 +57,19 @@ module.exports = {
 			},
 		},
 		'⚙️': {
-			script: `npx cowsay "@nativescript/* packages will keep your ⚙️ cranking"`,
-			description: '_____________  @nativescript/*  _____________',
+			script: `npx cowsay "@edusperoni/* packages will keep your ⚙️ cranking"`,
+			description: '_____________  @edusperoni/*  _____________',
 		},
 		// packages
 		// build output is always in dist/packages
-		'@nativescript': {
+		'@edusperoni': {
+			// @edusperoni/nativescript-sms-inbox
+			'nativescript-sms-inbox': {
+				build: {
+					script: 'nx run nativescript-sms-inbox:build.all',
+					description: '@edusperoni/nativescript-sms-inbox: Build',
+				},
+			},
 			'build-all': {
 				script: 'nx run all:build',
 				description: 'Build all packages',
@@ -73,6 +80,10 @@ module.exports = {
 			description: '_____________  Focus (VS Code supported)  _____________',
 		},
 		focus: {
+			'nativescript-sms-inbox': {
+				script: 'nx run nativescript-sms-inbox:focus',
+				description: 'Focus on @edusperoni/nativescript-sms-inbox',
+			},
 			reset: {
 				script: 'nx run all:focus',
 				description: 'Reset Focus',

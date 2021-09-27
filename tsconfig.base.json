@@ -23,7 +23,7 @@
       }
     ],
     "paths": {
-      "@nativescript/*": [
+      "@edusperoni/*": [
         "packages/*"
       ],
       "@demo/shared": [
