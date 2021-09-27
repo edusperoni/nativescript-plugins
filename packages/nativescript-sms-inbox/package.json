@@ -1,35 +1,34 @@
 {
-    "name": "@edusperoni/nativescript-sms-inbox",
-    "version": "1.0.0",
-    "description": "Add a plugin description",
-    "main": "index",
-    "typings": "index.d.ts",
-    "nativescript": {
-        "platforms": {
-            "ios": "6.0.0",
-            "android": "6.0.0"
-        }
-    },
-    "repository": {
-        "type": "git",
-        "url": "https://github.com/NativeScript/plugins.git"
-    },
-    "keywords": [
-        "NativeScript",
-        "JavaScript",
-        "TypeScript",
-        "iOS",
-        "Android"
-    ],
-    "author": {
-        "name": "NativeScript",
-        "email": "oss@nativescript.org"
-    },
-    "bugs": {
-        "url": "https://github.com/NativeScript/plugins/issues"
-    },
-    "license": "Apache-2.0",
-    "homepage": "https://github.com/NativeScript/plugins",
-    "readmeFilename": "README.md",
-    "bootstrapper": "@nativescript/plugin-seed"
+  "name": "@edusperoni/nativescript-sms-inbox",
+  "version": "1.0.2",
+  "description": "A NativeScript plugin to read text messages on android phone inbox using undocumented android api.",
+  "main": "index",
+  "typings": "index.d.ts",
+  "nativescript": {
+    "platforms": {
+      "ios": "6.0.0",
+      "android": "6.0.0"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NativeScript/plugins.git"
+  },
+  "keywords": [
+    "NativeScript",
+    "JavaScript",
+    "TypeScript",
+    "Android"
+  ],
+  "author": {
+    "name": "Eduardo Speroni",
+    "email": "edusperoni@gmail.com"
+  },
+  "bugs": {
+    "url": "https://github.com/NativeScript/plugins/issues"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/NativeScript/plugins",
+  "readmeFilename": "README.md",
+  "bootstrapper": "@nativescript/plugin-seed"
 }
