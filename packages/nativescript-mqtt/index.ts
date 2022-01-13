@@ -1,4 +1,5 @@
-import { IEvent, EventHandler, guid, Message } from './common';
+import { EventHandler, guid, Message } from './common';
+import type { IEvent } from './common';
 export { IEvent, EventHandler, guid, Message };
 import * as MQTT from './paho-mqtt';
 

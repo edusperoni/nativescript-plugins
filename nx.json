@@ -1,7 +1,7 @@
 {
   "npmScope": "edusperoni",
   "affected": {
-    "defaultBase": "master"
+    "defaultBase": "main"
   },
   "implicitDependencies": {
     "workspace.json": "*",
@@ -27,6 +27,9 @@
       "tags": []
     },
     "nativescript-mqtt": {
+      "tags": []
+    },
+    "nativescript-ripple": {
       "tags": []
     }
   },

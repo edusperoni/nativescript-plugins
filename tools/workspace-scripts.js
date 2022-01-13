@@ -77,6 +77,13 @@ module.exports = {
 					description: '@edusperoni/nativescript-mqtt: Build',
 				},
 			},
+			// @edusperoni/nativescript-ripple
+			'nativescript-ripple': {
+				build: {
+					script: 'nx run nativescript-ripple:build.all',
+					description: '@edusperoni/nativescript-ripple: Build',
+				},
+			},
 			'build-all': {
 				script: 'nx run all:build',
 				description: 'Build all packages',
@@ -94,6 +101,10 @@ module.exports = {
 			'nativescript-mqtt': {
 				script: 'nx run nativescript-mqtt:focus',
 				description: 'Focus on @edusperoni/nativescript-mqtt',
+			},
+			'nativescript-ripple': {
+				script: 'nx run nativescript-ripple:focus',
+				description: 'Focus on @edusperoni/nativescript-ripple',
 			},
 			reset: {
 				script: 'nx run all:focus',

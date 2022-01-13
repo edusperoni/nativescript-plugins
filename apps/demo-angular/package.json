@@ -3,7 +3,8 @@
   "dependencies": {
     "@nativescript/core": "file:../../node_modules/@nativescript/core",
     "@edusperoni/nativescript-sms-inbox": "file:../../dist/packages/nativescript-sms-inbox",
-    "@edusperoni/nativescript-mqtt": "file:../../dist/packages/nativescript-mqtt"
+    "@edusperoni/nativescript-mqtt": "file:../../dist/packages/nativescript-mqtt",
+    "@edusperoni/nativescript-ripple": "file:../../dist/packages/nativescript-ripple"
   },
   "devDependencies": {
     "@nativescript/android": "~8.1.1",

@@ -85,7 +85,8 @@
           "options": {
             "commands": [
               "nx run nativescript-sms-inbox:build.all",
-              "nx run nativescript-mqtt:build.all"
+              "nx run nativescript-mqtt:build.all",
+              "nx run nativescript-ripple:build.all"
             ],
             "parallel": false
           }
@@ -189,6 +190,52 @@
           "options": {
             "commands": [
               "nx g @nativescript/plugin-tools:focus-packages nativescript-mqtt"
+            ],
+            "parallel": false
+          }
+        }
+      }
+    },
+    "nativescript-ripple": {
+      "root": "packages/nativescript-ripple",
+      "projectType": "library",
+      "sourceRoot": "packages/nativescript-ripple",
+      "targets": {
+        "build": {
+          "executor": "@nrwl/node:package",
+          "options": {
+            "outputPath": "dist/packages/nativescript-ripple",
+            "tsConfig": "packages/nativescript-ripple/tsconfig.json",
+            "packageJson": "packages/nativescript-ripple/package.json",
+            "main": "packages/nativescript-ripple/index.ts",
+            "assets": [
+              "packages/nativescript-ripple/*.md",
+              "packages/nativescript-ripple/index.d.ts",
+              "packages/nativescript-ripple/lib/ripple-helper.d.ts",
+              "LICENSE",
+              {
+                "glob": "**/*",
+                "input": "packages/nativescript-ripple/platforms/",
+                "output": "./platforms/"
+              }
+            ]
+          }
+        },
+        "build.all": {
+          "executor": "@nrwl/workspace:run-commands",
+          "options": {
+            "commands": [
+              "nx run nativescript-ripple:build",
+              "node tools/scripts/build-finish.ts nativescript-ripple"
+            ],
+            "parallel": false
+          }
+        },
+        "focus": {
+          "executor": "@nrwl/workspace:run-commands",
+          "options": {
+            "commands": [
+              "nx g @nativescript/plugin-tools:focus-packages nativescript-ripple"
             ],
             "parallel": false
           }

@@ -10,6 +10,9 @@ export class HomeComponent {
 		name: 'nativescript-mqtt'
 	},
 	{
+		name: 'nativescript-ripple'
+	},
+	{
 		name: 'nativescript-sms-inbox'
 	}
 ];

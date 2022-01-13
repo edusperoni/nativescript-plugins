@@ -8,6 +8,7 @@ const routes: Routes = [
    { path: '', redirectTo: '/home', pathMatch: 'full' },
    { path: 'home', component: HomeComponent },
 	{ path: 'nativescript-mqtt', loadChildren: () => import('./plugin-demos/nativescript-mqtt.module').then(m => m.NativescriptMqttModule) },
+	{ path: 'nativescript-ripple', loadChildren: () => import('./plugin-demos/nativescript-ripple.module').then(m => m.NativescriptRippleModule) },
 	{ path: 'nativescript-sms-inbox', loadChildren: () => import('./plugin-demos/nativescript-sms-inbox.module').then(m => m.NativescriptSmsInboxModule) }
 ];
 

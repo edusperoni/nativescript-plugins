@@ -1,10 +1,12 @@
 import { Qos, Message } from './paho-mqtt';
-interface IEvent<T> {
+
+export { Message };
+export interface IEvent<T> {
     on(handler: { (data?: T): void }): void;
     off(handler?: { (data?: T): void }): void;
 }
 
-class EventHandler<T> implements IEvent<T> {
+export class EventHandler<T> implements IEvent<T> {
     private handlers: { (data?: T): void; }[] = [];
 
     public on(handler: { (data?: T): void }) {
@@ -43,7 +45,7 @@ class EventHandler<T> implements IEvent<T> {
 //     }
 // }
 
-function guid(): string {
+export function guid(): string {
     function s4() {
         return Math.floor((1 + Math.random()) * 0x10000)
             .toString(16)
@@ -52,5 +54,3 @@ function guid(): string {
     return s4() + s4() + '-' + s4() + '-' + s4() + '-' +
         s4() + '-' + s4() + s4() + s4();
 };
-
-export { IEvent, EventHandler, guid, Message };

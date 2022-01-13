@@ -1,0 +1,47 @@
+<ActionBar title="nativescript-ripple" class="action-bar"> </ActionBar>
+<StackLayout class="p-20">
+	<ScrollView class="h-full">
+		<StackLayout>
+            <Label ripple rippleColor="#d50000" text="Red Ripples!!!" class="message" textWrap="true"
+                (tap)="switchStyle()" [class.green]="isGreen"></Label>
+            <Button ripple="off" rippleLayer="background" rippleColor="#d50000"
+                text="This button had it's ripple removed!"></Button>
+            <Ripple rippleColor="blue" [rippleEnabled]="isGreen">
+                <StackLayout style="margin: 10; border-radius: 10; border-color: black; border-width: 1;" (tap)="dummy()">
+                    <Label text="Default Ripple" class="message" textWrap="true"></Label>
+                    <Label text="Default Ripple" class="message" textWrap="true"></Label>
+                </StackLayout>
+            </Ripple>
+            <Image ripple rippleColor="#fff000" (tap)="dummy()" src="~/assets/images/batman.png" margin="10"
+                stretch="aspectFit"></Image>
+            <GridLayout columns="*,*">
+                <StackLayout col="0" ripple rippleColor="blue" [rippleColorAlpha]="1" rippleLayer="background"
+                    (tap)="dummy()">
+                    <Label text="This ripple is in the background layer (iOS unaffected)" textWrap="true"
+                        style="text-align: center"></Label>
+                    <Image src="~/assets/images/batman.png" width="50" stretch="aspectFit"></Image>
+                </StackLayout>
+                <StackLayout col="1" ripple rippleColor="blue" [rippleColorAlpha]="1" (tap)="dummy()">
+                    <Label text="This ripple is in the foreground layer (default)" textWrap="true"
+                        style="text-align: center"></Label>
+                    <Image src="~/assets/images/batman.png" width="50" stretch="aspectFit"></Image>
+                </StackLayout>
+            </GridLayout>
+            <Label ripple text="Default Ripple" class="message" textWrap="true" (tap)="dummy()"></Label>
+            <Label ripple text="Ripple Alpha Override" [rippleColorAlpha]="1" class="message" textWrap="true"
+                (tap)="dummy()"></Label>
+            <GridLayout ripple rippleColor="#fff"
+                style="background-color: #FF4081; border-radius: 30; width: 60; height: 60; margin-top: 5; margin-bottom: 5;"
+                (tap)="dummy()">
+                <Label text="B" fontSize="30" color="#fff" verticalAlignment="center" horizontalAlignment="center"
+                    textWrap="true"></Label>
+            </GridLayout>
+
+            <Label ripple rippleColor="#c8c8c8" class="label-button" text="Lighter Ripple" textWrap="true"
+                (tap)="dummy()"></Label>
+            <Label ripple rippleColor="#f5f5f5" text="Possibilities" margin="15" class="dark-button" color="#fff"
+                padding="10" textWrap="true" (tap)="tapEvent()"></Label>
+
+        </StackLayout>
+	</ScrollView>
+</StackLayout>
