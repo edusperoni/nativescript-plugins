@@ -5,7 +5,7 @@ This nativescript-mqtt module is a cross-platofrm javascript implementation leve
 ## Usage Sample
 ### Create an MQTT Client
 ```typescript
-import {MQTTClient, ClientOptions, SubscribeOptions} from "nativescript-mqtt";
+import {MQTTClient, ClientOptions, SubscribeOptions} from "@edusperoni/nativescript-mqtt";
 ...
 class MyMQTT {
     ...
@@ -148,8 +148,8 @@ class Message {
 #### app.component.ts
 ```typescript
 import {Component} from "@angular/core";
-import {MQTTClient, ClientOptions, SubscribeOptions, Message} from "nativescript-mqtt";
-import {Message} from "nativescript-mqtt/common";
+import {MQTTClient, ClientOptions, SubscribeOptions, Message} from "@edusperoni/nativescript-mqtt";
+import {Message} from "@edusperoni/nativescript-mqtt/common";
 
 @Component({
     selector: "ns-app",
