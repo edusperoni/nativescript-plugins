@@ -70,6 +70,13 @@ module.exports = {
 					description: '@edusperoni/nativescript-sms-inbox: Build',
 				},
 			},
+			// @edusperoni/nativescript-mqtt
+			'nativescript-mqtt': {
+				build: {
+					script: 'nx run nativescript-mqtt:build.all',
+					description: '@edusperoni/nativescript-mqtt: Build',
+				},
+			},
 			'build-all': {
 				script: 'nx run all:build',
 				description: 'Build all packages',
@@ -83,6 +90,10 @@ module.exports = {
 			'nativescript-sms-inbox': {
 				script: 'nx run nativescript-sms-inbox:focus',
 				description: 'Focus on @edusperoni/nativescript-sms-inbox',
+			},
+			'nativescript-mqtt': {
+				script: 'nx run nativescript-mqtt:focus',
+				description: 'Focus on @edusperoni/nativescript-mqtt',
 			},
 			reset: {
 				script: 'nx run all:focus',

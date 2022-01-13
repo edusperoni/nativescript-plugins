@@ -4,8 +4,10 @@
   "license": "SEE LICENSE IN <your-license-filename>",
   "repository": "<fill-your-repository-here>",
   "dependencies": {
+    "@edusperoni/nativescript-mqtt": "file:../../packages/nativescript-mqtt",
+    "@edusperoni/nativescript-sms-inbox": "file:../../packages/nativescript-sms-inbox",
     "@nativescript/core": "file:../../node_modules/@nativescript/core",
-    "@edusperoni/nativescript-sms-inbox": "file:../../packages/nativescript-sms-inbox"
+    "@nativescript/unit-test-runner": "^3.0.2"
   },
   "devDependencies": {
     "@nativescript/android": "~8.1.1",

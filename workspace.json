@@ -84,7 +84,8 @@
           ],
           "options": {
             "commands": [
-              "nx run nativescript-sms-inbox:build.all"
+              "nx run nativescript-sms-inbox:build.all",
+              "nx run nativescript-mqtt:build.all"
             ],
             "parallel": false
           }
@@ -143,6 +144,51 @@
           "options": {
             "commands": [
               "nx g @nativescript/plugin-tools:focus-packages nativescript-sms-inbox"
+            ],
+            "parallel": false
+          }
+        }
+      }
+    },
+    "nativescript-mqtt": {
+      "root": "packages/nativescript-mqtt",
+      "projectType": "library",
+      "sourceRoot": "packages/nativescript-mqtt",
+      "targets": {
+        "build": {
+          "executor": "@nrwl/node:package",
+          "options": {
+            "outputPath": "dist/packages/nativescript-mqtt",
+            "tsConfig": "packages/nativescript-mqtt/tsconfig.json",
+            "packageJson": "packages/nativescript-mqtt/package.json",
+            "main": "packages/nativescript-mqtt/index.ts",
+            "assets": [
+              "packages/nativescript-mqtt/*.md",
+              "packages/nativescript-mqtt/index.d.ts",
+              "LICENSE",
+              {
+                "glob": "**/*",
+                "input": "packages/nativescript-mqtt/platforms/",
+                "output": "./platforms/"
+              }
+            ]
+          }
+        },
+        "build.all": {
+          "executor": "@nrwl/workspace:run-commands",
+          "options": {
+            "commands": [
+              "nx run nativescript-mqtt:build",
+              "node tools/scripts/build-finish.ts nativescript-mqtt"
+            ],
+            "parallel": false
+          }
+        },
+        "focus": {
+          "executor": "@nrwl/workspace:run-commands",
+          "options": {
+            "commands": [
+              "nx g @nativescript/plugin-tools:focus-packages nativescript-mqtt"
             ],
             "parallel": false
           }

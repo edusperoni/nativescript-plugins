@@ -25,6 +25,9 @@
     },
     "nativescript-sms-inbox": {
       "tags": []
+    },
+    "nativescript-mqtt": {
+      "tags": []
     }
   },
   "workspaceLayout": {

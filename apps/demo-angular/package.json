@@ -2,7 +2,8 @@
   "main": "./src/main.ts",
   "dependencies": {
     "@nativescript/core": "file:../../node_modules/@nativescript/core",
-    "@edusperoni/nativescript-sms-inbox": "file:../../dist/packages/nativescript-sms-inbox"
+    "@edusperoni/nativescript-sms-inbox": "file:../../dist/packages/nativescript-sms-inbox",
+    "@edusperoni/nativescript-mqtt": "file:../../dist/packages/nativescript-mqtt"
   },
   "devDependencies": {
     "@nativescript/android": "~8.1.1",

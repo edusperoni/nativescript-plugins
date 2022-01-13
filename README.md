@@ -1,3 +1,4 @@
+- [@edusperoni/nativescript-mqtt](packages/nativescript-mqtt/README.md)
 - [@edusperoni/nativescript-sms-inbox](packages/nativescript-sms-inbox/README.md)
 
 # How to use?
