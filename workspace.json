@@ -113,6 +113,7 @@
 				},
 				"build.all": {
 					"executor": "@nrwl/workspace:run-commands",
+					"outputs": ["dist/packages/nativescript-mqtt"],
 					"options": {
 						"commands": ["nx run nativescript-mqtt:build", "node tools/scripts/build-finish.ts nativescript-mqtt"],
 						"parallel": false
@@ -161,6 +162,7 @@
 				},
 				"build.all": {
 					"executor": "@nrwl/workspace:run-commands",
+					"outputs": ["dist/packages/nativescript-ripple"],
 					"options": {
 						"commands": ["nx run nativescript-ripple:build", "node tools/scripts/build-finish.ts nativescript-ripple"],
 						"parallel": false
@@ -208,6 +210,7 @@
 				},
 				"build.all": {
 					"executor": "@nrwl/workspace:run-commands",
+					"outputs": ["dist/packages/nativescript-sms-inbox"],
 					"options": {
 						"commands": ["nx run nativescript-sms-inbox:build", "node tools/scripts/build-finish.ts nativescript-sms-inbox"],
 						"parallel": false
