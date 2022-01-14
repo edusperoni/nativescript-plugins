@@ -199,7 +199,7 @@ export class MQTTClient {
         }
 
         const deferred = this.defer<void>();
-        let mqttConnectOptions: MQTT.ConnectionOptions = {
+        const mqttConnectOptions: MQTT.ConnectionOptions = {
             ...connectOptions,
             onSuccess: () => {
                 this._connectionState = ConnectionState.CONNECTED;

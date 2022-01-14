@@ -70,7 +70,7 @@ describe("connect function", function() {
         it("should connect", function(done) {
             let successFunCalled = false;
             let onconnectedCalled = false;
-            let expectConnected = () => {
+            const expectConnected = () => {
                 expect(mqttClient.connected).toEqual(true);
                 expect(mqttClient.connectionState).toEqual(ConnectionState.CONNECTED);
                 if (successFunCalled && onconnectedCalled) {

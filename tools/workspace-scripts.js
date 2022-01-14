@@ -85,7 +85,7 @@ module.exports = {
 				},
 			},
 			'build-all': {
-				script: 'nx run all:build',
+				script: 'nx run-many --all --target=build.all',
 				description: 'Build all packages',
 			},
 		},
@@ -107,7 +107,7 @@ module.exports = {
 				description: 'Focus on @edusperoni/nativescript-ripple',
 			},
 			reset: {
-				script: 'nx run all:focus',
+				script: 'nx g @nativescript/plugin-tools:focus-packages',
 				description: 'Reset Focus',
 			}
 		},

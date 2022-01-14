@@ -1,249 +1,233 @@
 {
-  "version": 2,
-  "projects": {
-    "demo": {
-      "root": "apps/demo/",
-      "sourceRoot": "apps/demo/src",
-      "projectType": "application",
-      "prefix": "demo",
-      "targets": {
-        "build": {
-          "executor": "@nativescript/nx:build",
-          "options": {
-            "noHmr": true,
-            "production": true,
-            "uglify": true,
-            "release": true,
-            "forDevice": true
-          }
-        },
-        "ios": {
-          "executor": "@nativescript/nx:build",
-          "options": {
-            "platform": "ios"
-          }
-        },
-        "android": {
-          "executor": "@nativescript/nx:build",
-          "options": {
-            "platform": "android"
-          }
-        },
-        "clean": {
-          "executor": "@nativescript/nx:build",
-          "options": {
-            "clean": true
-          }
-        }
-      }
-    },
-    "demo-angular": {
-      "root": "apps/demo-angular/",
-      "sourceRoot": "apps/demo-angular/src",
-      "projectType": "application",
-      "prefix": "demo",
-      "targets": {
-        "build": {
-          "executor": "@nativescript/nx:build",
-          "options": {
-            "noHmr": true,
-            "production": true,
-            "uglify": true,
-            "release": true,
-            "forDevice": true
-          }
-        },
-        "ios": {
-          "executor": "@nativescript/nx:build",
-          "options": {
-            "platform": "ios"
-          }
-        },
-        "android": {
-          "executor": "@nativescript/nx:build",
-          "options": {
-            "platform": "android"
-          }
-        },
-        "clean": {
-          "executor": "@nativescript/nx:build",
-          "options": {
-            "clean": true
-          }
-        }
-      }
-    },
-    "all": {
-      "root": "",
-      "projectType": "application",
-      "targets": {
-        "build": {
-          "executor": "@nrwl/workspace:run-commands",
-          "outputs": [
-            "dist/packages"
-          ],
-          "options": {
-            "commands": [
-              "nx run nativescript-sms-inbox:build.all",
-              "nx run nativescript-mqtt:build.all",
-              "nx run nativescript-ripple:build.all"
-            ],
-            "parallel": false
-          }
-        },
-        "focus": {
-          "outputs": [
-            "dist/packages"
-          ],
-          "options": {
-            "commands": [
-              "nx g @nativescript/plugin-tools:focus-packages"
-            ],
-            "parallel": false
-          },
-          "executor": "@nrwl/workspace:run-commands"
-        }
-      },
-      "sourceRoot": ""
-    },
-    "nativescript-sms-inbox": {
-      "root": "packages/nativescript-sms-inbox",
-      "projectType": "library",
-      "sourceRoot": "packages/nativescript-sms-inbox",
-      "targets": {
-        "build": {
-          "executor": "@nrwl/node:package",
-          "options": {
-            "outputPath": "dist/packages/nativescript-sms-inbox",
-            "tsConfig": "packages/nativescript-sms-inbox/tsconfig.json",
-            "packageJson": "packages/nativescript-sms-inbox/package.json",
-            "main": "packages/nativescript-sms-inbox/index.d.ts",
-            "assets": [
-              "packages/nativescript-sms-inbox/*.md",
-              "packages/nativescript-sms-inbox/index.d.ts",
-              "LICENSE",
-              {
-                "glob": "**/*",
-                "input": "packages/nativescript-sms-inbox/platforms/",
-                "output": "./platforms/"
-              }
-            ]
-          }
-        },
-        "build.all": {
-          "executor": "@nrwl/workspace:run-commands",
-          "options": {
-            "commands": [
-              "nx run nativescript-sms-inbox:build",
-              "node tools/scripts/build-finish.ts nativescript-sms-inbox"
-            ],
-            "parallel": false
-          }
-        },
-        "focus": {
-          "executor": "@nrwl/workspace:run-commands",
-          "options": {
-            "commands": [
-              "nx g @nativescript/plugin-tools:focus-packages nativescript-sms-inbox"
-            ],
-            "parallel": false
-          }
-        }
-      }
-    },
-    "nativescript-mqtt": {
-      "root": "packages/nativescript-mqtt",
-      "projectType": "library",
-      "sourceRoot": "packages/nativescript-mqtt",
-      "targets": {
-        "build": {
-          "executor": "@nrwl/node:package",
-          "options": {
-            "outputPath": "dist/packages/nativescript-mqtt",
-            "tsConfig": "packages/nativescript-mqtt/tsconfig.json",
-            "packageJson": "packages/nativescript-mqtt/package.json",
-            "main": "packages/nativescript-mqtt/index.ts",
-            "assets": [
-              "packages/nativescript-mqtt/*.md",
-              "packages/nativescript-mqtt/index.d.ts",
-              "LICENSE",
-              {
-                "glob": "**/*",
-                "input": "packages/nativescript-mqtt/platforms/",
-                "output": "./platforms/"
-              }
-            ]
-          }
-        },
-        "build.all": {
-          "executor": "@nrwl/workspace:run-commands",
-          "options": {
-            "commands": [
-              "nx run nativescript-mqtt:build",
-              "node tools/scripts/build-finish.ts nativescript-mqtt"
-            ],
-            "parallel": false
-          }
-        },
-        "focus": {
-          "executor": "@nrwl/workspace:run-commands",
-          "options": {
-            "commands": [
-              "nx g @nativescript/plugin-tools:focus-packages nativescript-mqtt"
-            ],
-            "parallel": false
-          }
-        }
-      }
-    },
-    "nativescript-ripple": {
-      "root": "packages/nativescript-ripple",
-      "projectType": "library",
-      "sourceRoot": "packages/nativescript-ripple",
-      "targets": {
-        "build": {
-          "executor": "@nrwl/node:package",
-          "options": {
-            "outputPath": "dist/packages/nativescript-ripple",
-            "tsConfig": "packages/nativescript-ripple/tsconfig.json",
-            "packageJson": "packages/nativescript-ripple/package.json",
-            "main": "packages/nativescript-ripple/index.ts",
-            "assets": [
-              "packages/nativescript-ripple/*.md",
-              "packages/nativescript-ripple/index.d.ts",
-              "packages/nativescript-ripple/lib/ripple-helper.d.ts",
-              "LICENSE",
-              {
-                "glob": "**/*",
-                "input": "packages/nativescript-ripple/platforms/",
-                "output": "./platforms/"
-              }
-            ]
-          }
-        },
-        "build.all": {
-          "executor": "@nrwl/workspace:run-commands",
-          "options": {
-            "commands": [
-              "nx run nativescript-ripple:build",
-              "node tools/scripts/build-finish.ts nativescript-ripple"
-            ],
-            "parallel": false
-          }
-        },
-        "focus": {
-          "executor": "@nrwl/workspace:run-commands",
-          "options": {
-            "commands": [
-              "nx g @nativescript/plugin-tools:focus-packages nativescript-ripple"
-            ],
-            "parallel": false
-          }
-        }
-      }
-    }
-  },
-  "cli": {
-    "defaultCollection": "@nrwl/workspace"
-  }
+	"version": 2,
+	"projects": {
+		"demo": {
+			"root": "apps/demo/",
+			"sourceRoot": "apps/demo/src",
+			"projectType": "application",
+			"prefix": "demo",
+			"targets": {
+				"build": {
+					"executor": "@nativescript/nx:build",
+					"options": {
+						"noHmr": true,
+						"production": true,
+						"uglify": true,
+						"release": true,
+						"forDevice": true
+					}
+				},
+				"ios": {
+					"executor": "@nativescript/nx:build",
+					"options": {
+						"platform": "ios"
+					}
+				},
+				"android": {
+					"executor": "@nativescript/nx:build",
+					"options": {
+						"platform": "android"
+					}
+				},
+				"clean": {
+					"executor": "@nativescript/nx:build",
+					"options": {
+						"clean": true
+					}
+				},
+				"lint": {
+					"executor": "@nrwl/linter:eslint",
+					"options": {
+						"lintFilePatterns": ["apps/demo/**/*.ts"]
+					}
+				}
+			},
+			"tags": []
+		},
+		"demo-angular": {
+			"root": "apps/demo-angular/",
+			"sourceRoot": "apps/demo-angular/src",
+			"projectType": "application",
+			"prefix": "demo",
+			"targets": {
+				"build": {
+					"executor": "@nativescript/nx:build",
+					"options": {
+						"noHmr": true,
+						"production": true,
+						"uglify": true,
+						"release": true,
+						"forDevice": true
+					}
+				},
+				"ios": {
+					"executor": "@nativescript/nx:build",
+					"options": {
+						"platform": "ios"
+					}
+				},
+				"android": {
+					"executor": "@nativescript/nx:build",
+					"options": {
+						"platform": "android"
+					}
+				},
+				"clean": {
+					"executor": "@nativescript/nx:build",
+					"options": {
+						"clean": true
+					}
+				},
+				"lint": {
+					"executor": "@nrwl/linter:eslint",
+					"options": {
+						"lintFilePatterns": ["apps/demo-angular/**/*.ts"]
+					}
+				}
+			},
+			"tags": []
+		},
+		"nativescript-mqtt": {
+			"root": "packages/nativescript-mqtt",
+			"projectType": "library",
+			"sourceRoot": "packages/nativescript-mqtt",
+			"targets": {
+				"build": {
+					"executor": "@nrwl/node:package",
+					"options": {
+						"outputPath": "dist/packages/nativescript-mqtt",
+						"tsConfig": "packages/nativescript-mqtt/tsconfig.json",
+						"packageJson": "packages/nativescript-mqtt/package.json",
+						"main": "packages/nativescript-mqtt/index.ts",
+						"assets": [
+							"packages/nativescript-mqtt/*.md",
+							"packages/nativescript-mqtt/index.d.ts",
+							"LICENSE",
+							{
+								"glob": "**/*",
+								"input": "packages/nativescript-mqtt/platforms/",
+								"output": "./platforms/"
+							}
+						]
+					}
+				},
+				"build.all": {
+					"executor": "@nrwl/workspace:run-commands",
+					"options": {
+						"commands": ["nx run nativescript-mqtt:build", "node tools/scripts/build-finish.ts nativescript-mqtt"],
+						"parallel": false
+					}
+				},
+				"focus": {
+					"executor": "@nrwl/workspace:run-commands",
+					"options": {
+						"commands": ["nx g @nativescript/plugin-tools:focus-packages nativescript-mqtt"],
+						"parallel": false
+					}
+				},
+				"lint": {
+					"executor": "@nrwl/linter:eslint",
+					"options": {
+						"lintFilePatterns": ["packages/nativescript-mqtt/**/*.ts"]
+					}
+				}
+			},
+			"tags": []
+		},
+		"nativescript-ripple": {
+			"root": "packages/nativescript-ripple",
+			"projectType": "library",
+			"sourceRoot": "packages/nativescript-ripple",
+			"targets": {
+				"build": {
+					"executor": "@nrwl/node:package",
+					"options": {
+						"outputPath": "dist/packages/nativescript-ripple",
+						"tsConfig": "packages/nativescript-ripple/tsconfig.json",
+						"packageJson": "packages/nativescript-ripple/package.json",
+						"main": "packages/nativescript-ripple/index.ts",
+						"assets": [
+							"packages/nativescript-ripple/*.md",
+							"packages/nativescript-ripple/index.d.ts",
+							"packages/nativescript-ripple/lib/ripple-helper.d.ts",
+							"LICENSE",
+							{
+								"glob": "**/*",
+								"input": "packages/nativescript-ripple/platforms/",
+								"output": "./platforms/"
+							}
+						]
+					}
+				},
+				"build.all": {
+					"executor": "@nrwl/workspace:run-commands",
+					"options": {
+						"commands": ["nx run nativescript-ripple:build", "node tools/scripts/build-finish.ts nativescript-ripple"],
+						"parallel": false
+					}
+				},
+				"focus": {
+					"executor": "@nrwl/workspace:run-commands",
+					"options": {
+						"commands": ["nx g @nativescript/plugin-tools:focus-packages nativescript-ripple"],
+						"parallel": false
+					}
+				},
+				"lint": {
+					"executor": "@nrwl/linter:eslint",
+					"options": {
+						"lintFilePatterns": ["packages/nativescript-ripple/**/*.ts"]
+					}
+				}
+			},
+			"tags": []
+		},
+		"nativescript-sms-inbox": {
+			"root": "packages/nativescript-sms-inbox",
+			"projectType": "library",
+			"sourceRoot": "packages/nativescript-sms-inbox",
+			"targets": {
+				"build": {
+					"executor": "@nrwl/node:package",
+					"options": {
+						"outputPath": "dist/packages/nativescript-sms-inbox",
+						"tsConfig": "packages/nativescript-sms-inbox/tsconfig.json",
+						"packageJson": "packages/nativescript-sms-inbox/package.json",
+						"main": "packages/nativescript-sms-inbox/index.d.ts",
+						"assets": [
+							"packages/nativescript-sms-inbox/*.md",
+							"packages/nativescript-sms-inbox/index.d.ts",
+							"LICENSE",
+							{
+								"glob": "**/*",
+								"input": "packages/nativescript-sms-inbox/platforms/",
+								"output": "./platforms/"
+							}
+						]
+					}
+				},
+				"build.all": {
+					"executor": "@nrwl/workspace:run-commands",
+					"options": {
+						"commands": ["nx run nativescript-sms-inbox:build", "node tools/scripts/build-finish.ts nativescript-sms-inbox"],
+						"parallel": false
+					}
+				},
+				"focus": {
+					"executor": "@nrwl/workspace:run-commands",
+					"options": {
+						"commands": ["nx g @nativescript/plugin-tools:focus-packages nativescript-sms-inbox"],
+						"parallel": false
+					}
+				},
+				"lint": {
+					"executor": "@nrwl/linter:eslint",
+					"options": {
+						"lintFilePatterns": ["packages/nativescript-sms-inbox/**/*.ts"]
+					}
+				}
+			},
+			"tags": []
+		}
+	}
 }

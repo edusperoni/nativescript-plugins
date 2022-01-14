@@ -13,9 +13,9 @@
       "@demo/shared": [
         "../../tools/demo/index.ts"
       ],
-      "@edusperoni/*": [
-        "../../dist/packages/*"
-      ]
+      "@edusperoni/nativescript-mqtt": ["../../packages/nativescript-mqtt/index.ts"],
+			"@edusperoni/nativescript-ripple": ["../../packages/nativescript-ripple/index.ts"],
+			"@edusperoni/nativescript-sms-inbox": ["../../packages/nativescript-sms-inbox/index.d.ts"],
     }
   },
   "files": [

@@ -18,7 +18,7 @@ export class NativescriptRippleComponent {
   }
 
   dummy(): void {
-
+    // dummy function
   }
 
   switchStyle() {
