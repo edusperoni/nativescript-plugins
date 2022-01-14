@@ -4,6 +4,9 @@ _shared_config: &shared_config
   os: linux
   node_js: "12"
   before_script: npm i -g nativescript
+  cache:
+    - yarn
+    - npm
 matrix:
   include:
     - stage: "Lint"
