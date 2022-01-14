@@ -5,6 +5,9 @@ _shared_config: &shared_config
   node_js: "12"
 matrix:
   include:
+    - stage: "Lint"
+      <<: *shared_config
+      script: npm run setup && npm run lint
     - stage: "Build"
       <<: *shared_config
       script: npm run setup && npm start @edusperoni.build-all
