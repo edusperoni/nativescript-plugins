@@ -17,5 +17,6 @@
         "../../tools/demo/index.ts"
       ]
     }
-  }
+  },
+  "exclude": ["**/*.spec.ts"]
 }

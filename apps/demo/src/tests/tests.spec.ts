@@ -1,6 +1,15 @@
 import { ConnectionState, Message, MQTTClient, OnConnectedParams } from "@edusperoni/nativescript-mqtt";
 /// <reference path="./custom-matchers.d.ts" />
 
+declare global {
+    // eslint-disable-next-line @typescript-eslint/no-namespace
+    namespace jasmine {
+        interface Matchers<T> {
+            toBeMQTTErrror(): void;
+        }
+    }
+}
+
 function generateClient() {
     return new MQTTClient({
         host: "broker.mqttdashboard.com",

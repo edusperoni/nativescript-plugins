@@ -43,7 +43,7 @@ matrix:
     - <<: *shared_config
       os: osx
       jdk: oraclejdk8
-      osx_image: xcode10.2
+      osx_image: xcode12.5
       cache:
         yarn: true
         npm: true
