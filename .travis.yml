@@ -3,6 +3,7 @@ _shared_config: &shared_config
   language: node_js
   os: linux
   node_js: "12"
+  before_script: npm i -g nativescript
 matrix:
   include:
     - stage: "Lint"
@@ -18,12 +19,13 @@ matrix:
       sudo: required
       jdk: oraclejdk8
       before_script:
+        - npm i -g nativescript
         - android list targets
         - echo no | android create avd --force -n test -t android-21 -b armeabi-v7a
         - emulator -avd test -no-audio -no-window &
         - android-wait-for-emulator
       before_install:
-        - nvm install 10
+        - nvm install 12
       script: npm run setup && cd apps/demo && ns test android
     - <<: *shared_config
       os: osx
