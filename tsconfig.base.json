@@ -23,7 +23,8 @@
 			"@demo/shared": ["tools/demo/index.ts"],
 			"@edusperoni/nativescript-mqtt": ["packages/nativescript-mqtt/index.ts"],
 			"@edusperoni/nativescript-ripple": ["packages/nativescript-ripple/index.ts"],
-			"@edusperoni/nativescript-sms-inbox": ["packages/nativescript-sms-inbox/index.d.ts"]
+			"@edusperoni/nativescript-ripple/angular": ["packages/nativescript-ripple/angular/index.ts"],
+			"@edusperoni/nativescript-sms-inbox": ["packages/nativescript-sms-inbox/index.d.ts"],
 		}
 	},
 	"exclude": ["node_modules", "tmp"]
