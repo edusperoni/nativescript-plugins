@@ -194,6 +194,8 @@
 						"assets": [
 							"packages/nativescript-mqtt/*.md",
 							"packages/nativescript-mqtt/index.d.ts",
+							"packages/nativescript-mqtt/paho-mqtt.js",
+							"packages/nativescript-mqtt/paho-mqtt.d.ts",
 							"LICENSE",
 							{
 								"glob": "**/*",
