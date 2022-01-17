@@ -4,6 +4,7 @@ _shared_config: &shared_config
   os: linux
   node_js: "12"
   before_script: npm i -g nativescript
+  install: yarn install
   cache:
     yarn: true
     npm: true

@@ -4,7 +4,8 @@
   "license": "MIT",
   "scripts": {
     "postinstall": "husky install && npx ts-patch install",
-    "setup": "npx rimraf node_modules package-lock.json dist tmp yarn.lock && yarn config set ignore-engines true && ns package-manager set npm && yarn",
+    "setup": "yarn config set ignore-engines true && ns package-manager set npm && yarn",
+    "clean": "npx rimraf node_modules package-lock.json dist tmp yarn.lock && npm run setup",
     "start": "nps",
     "add": "nx g @nativescript/plugin-tools:add-package",
     "add-angular": "nx g @nativescript/plugin-tools:add-angular",
@@ -68,6 +69,7 @@
     ]
   },
   "dependencies": {
-    "@master.technology/websockets": "^2.0.3"
+    "@master.technology/websockets": "^2.0.3",
+    "@nrwl/nx-cloud": "^13.0.2"
   }
 }

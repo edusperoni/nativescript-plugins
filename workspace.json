@@ -9,25 +9,68 @@
 			"targets": {
 				"build": {
 					"executor": "@nativescript/nx:build",
-					"options": {
-						"noHmr": true,
-						"production": true,
-						"uglify": true,
-						"release": true,
-						"forDevice": true
-					}
+					"options": {},
+					"dependsOn": [
+						{
+						  "target": "build.all",
+						  "projects": "dependencies"
+						}
+					]
+				},
+				"test": {
+					"executor": "@nativescript/nx:test",
+					"configurations": {
+						"android": {},
+						"ios": {}
+					},
+					"dependsOn": [
+						{
+						  "target": "build.all",
+						  "projects": "dependencies"
+						}
+					]
 				},
 				"ios": {
 					"executor": "@nativescript/nx:build",
 					"options": {
 						"platform": "ios"
-					}
+					},
+					"configurations": {
+						"build": {
+							"noHmr": true,
+							"production": true,
+							"uglify": true,
+							"release": false,
+							"forDevice": true
+						}
+					},
+					"dependsOn": [
+						{
+						  "target": "build.all",
+						  "projects": "dependencies"
+						}
+					]
 				},
 				"android": {
 					"executor": "@nativescript/nx:build",
 					"options": {
 						"platform": "android"
-					}
+					},
+					"configurations": {
+						"build": {
+							"noHmr": true,
+							"production": true,
+							"uglify": true,
+							"release": false,
+							"forDevice": true
+						}
+					},
+					"dependsOn": [
+						{
+						  "target": "build.all",
+						  "projects": "dependencies"
+						}
+					]
 				},
 				"clean": {
 					"executor": "@nativescript/nx:build",
@@ -58,19 +101,68 @@
 						"uglify": true,
 						"release": true,
 						"forDevice": true
-					}
+					},
+					"dependsOn": [
+						{
+						  "target": "build.all",
+						  "projects": "dependencies"
+						}
+					]
+				},
+				"test": {
+					"executor": "@nativescript/nx:test",
+					"configurations": {
+						"android": {},
+						"ios": {}
+					},
+					"dependsOn": [
+						{
+						  "target": "build.all",
+						  "projects": "dependencies"
+						}
+					]
 				},
 				"ios": {
 					"executor": "@nativescript/nx:build",
 					"options": {
 						"platform": "ios"
-					}
+					},
+					"configurations": {
+						"build": {
+							"noHmr": true,
+							"production": true,
+							"uglify": true,
+							"release": false,
+							"forDevice": true
+						}
+					},
+					"dependsOn": [
+						{
+						  "target": "build.all",
+						  "projects": "dependencies"
+						}
+					]
 				},
 				"android": {
 					"executor": "@nativescript/nx:build",
 					"options": {
 						"platform": "android"
-					}
+					},
+					"configurations": {
+						"build": {
+							"noHmr": true,
+							"production": true,
+							"uglify": true,
+							"release": false,
+							"forDevice": true
+						}
+					},
+					"dependsOn": [
+						{
+						  "target": "build.all",
+						  "projects": "dependencies"
+						}
+					]
 				},
 				"clean": {
 					"executor": "@nativescript/nx:build",
@@ -113,6 +205,7 @@
 				},
 				"build.all": {
 					"executor": "@nrwl/workspace:run-commands",
+					"outputs": ["dist/packages/nativescript-mqtt"],
 					"options": {
 						"commands": ["nx run nativescript-mqtt:build", "node tools/scripts/build-finish.ts nativescript-mqtt"],
 						"parallel": false
@@ -161,6 +254,7 @@
 				},
 				"build.all": {
 					"executor": "@nrwl/workspace:run-commands",
+					"outputs": ["dist/packages/nativescript-ripple"],
 					"options": {
 						"commands": ["nx run nativescript-ripple:build", "node tools/scripts/build-finish.ts nativescript-ripple"],
 						"parallel": false
@@ -208,6 +302,7 @@
 				},
 				"build.all": {
 					"executor": "@nrwl/workspace:run-commands",
+					"outputs": ["dist/packages/nativescript-sms-inbox"],
 					"options": {
 						"commands": ["nx run nativescript-sms-inbox:build", "node tools/scripts/build-finish.ts nativescript-sms-inbox"],
 						"parallel": false
