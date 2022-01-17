@@ -12,7 +12,6 @@ export class Ripple extends ContentView implements AddChildFromBuilder {
 
     constructor() {
         super();
-        console.log('constructor!');
     }
 
     public _addChildFromBuilder(name: string, value: any) {
