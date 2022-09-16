@@ -4,7 +4,8 @@
 		"@nativescript/core": "file:../../node_modules/@nativescript/core",
 		"@edusperoni/nativescript-sms-inbox": "file:../../packages/nativescript-sms-inbox",
 		"@edusperoni/nativescript-mqtt": "file:../../packages/nativescript-mqtt",
-		"@edusperoni/nativescript-ripple": "file:../../packages/nativescript-ripple"
+		"@edusperoni/nativescript-ripple": "file:../../packages/nativescript-ripple",
+		"@valor/nativescript-websockets": "^1.0.3"
 	},
 	"devDependencies": {
 		"@nativescript/android": "~8.1.1",

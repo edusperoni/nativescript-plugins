@@ -81,7 +81,7 @@ function onMessageArrived(message) {
  */
 
 if (typeof WebSocket === "undefined") {
-	require("@master.technology/websockets");
+	require("@valor/nativescript-websockets");
 }
  
 /* jshint shadow:true */
