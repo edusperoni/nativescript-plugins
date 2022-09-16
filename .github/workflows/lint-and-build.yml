@@ -6,9 +6,9 @@ env:
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "master" ]
+    branches: [ "main" ]
 
 jobs:
   lint:
@@ -24,7 +24,7 @@ jobs:
           node-version: lts/*
       - uses: nrwl/nx-set-shas@v2
         with:
-          main-branch-name: 'master'
+          main-branch-name: 'main'
       - name: Setup global dependencies
         run: npm i -g yarn
       - name: Setup yarn cache
@@ -50,7 +50,7 @@ jobs:
           node-version: lts/*
       - uses: nrwl/nx-set-shas@v2
         with:
-          main-branch-name: 'master'
+          main-branch-name: 'main'
       - name: Setup global dependencies
         run: npm i -g yarn
       - name: Setup yarn cache
