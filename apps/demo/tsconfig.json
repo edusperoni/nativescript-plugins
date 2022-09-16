@@ -1,22 +1,16 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "rootDirs": [
-      ".",
-      "../.."
-    ],
-    "baseUrl": ".",
-    "paths": {
-      "~/*": [
-        "src/*"
-      ],
-      "@edusperoni/nativescript-mqtt": ["../../packages/nativescript-mqtt/index.ts"],
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"rootDirs": [".", "../.."],
+		"baseUrl": ".",
+		"paths": {
+			"~/*": ["src/*"],
+			"@edusperoni/nativescript-mqtt": ["../../packages/nativescript-mqtt/index.ts"],
 			"@edusperoni/nativescript-ripple": ["../../packages/nativescript-ripple/index.ts"],
 			"@edusperoni/nativescript-sms-inbox": ["../../packages/nativescript-sms-inbox/index.d.ts"],
-      "@demo/shared": [
-        "../../tools/demo/index.ts"
-      ]
-    }
-  },
-  "exclude": ["**/*.spec.ts"]
+			"@demo/shared": ["../../tools/demo/index.ts"],
+			"@edusperoni/nativescript-ripple/angular": ["../../packages/nativescript-ripple/angular/index.ts"]
+		}
+	},
+	"exclude": ["**/*.spec.ts"]
 }

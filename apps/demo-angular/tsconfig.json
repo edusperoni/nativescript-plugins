@@ -1,23 +1,17 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "outDir": "../../dist/out-tsc",
-    "types": [],
-    "paths": {
-      "@demo/shared": ["tools/demo/index.ts"],
-      "@edusperoni/nativescript-mqtt": ["packages/nativescript-mqtt/index.ts"],
-      "@edusperoni/nativescript-ripple": ["packages/nativescript-ripple/index.ts"],
-      "@edusperoni/nativescript-ripple/angular": ["packages/nativescript-ripple/angular/index.ts"],
-      "@edusperoni/nativescript-sms-inbox": ["packages/nativescript-sms-inbox/index.d.ts"],
-      "~/*": [
-        "apps/demo-angular/src/*"
-      ],
-    },
-  },
-  "files": [
-    "./references.d.ts",
-    "./src/main.ts",
-    "./src/polyfills.ts"
-  ],
-  "include": ["../../packages/**/*.android.ts","../../packages/**/*.ios.ts"]
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"outDir": "../../dist/out-tsc",
+		"types": [],
+		"paths": {
+			"@demo/shared": ["tools/demo/index.ts"],
+			"@edusperoni/nativescript-mqtt": ["packages/nativescript-mqtt/index.ts"],
+			"@edusperoni/nativescript-ripple": ["packages/nativescript-ripple/index.ts"],
+			"@edusperoni/nativescript-ripple/angular": ["packages/nativescript-ripple/angular/index.ts"],
+			"@edusperoni/nativescript-sms-inbox": ["packages/nativescript-sms-inbox/index.d.ts"],
+			"~/*": ["apps/demo-angular/src/*"]
+		}
+	},
+	"files": ["./references.d.ts", "./src/main.ts", "./src/polyfills.ts"],
+	"include": ["../../packages/**/*.android.ts", "../../packages/**/*.ios.ts", "../../packages/**/references.d.ts"]
 }

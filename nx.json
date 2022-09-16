@@ -1,39 +1,33 @@
 {
-  "extends": "@nrwl/workspace/presets/core.json",
-  "npmScope": "edusperoni",
-  "affected": {
-    "defaultBase": "main"
-  },
-  "implicitDependencies": {
-    "workspace.json": "*",
-    "package.json": {
-      "dependencies": "*",
-      "devDependencies": "*"
-    },
-    "tsconfig.base.json": "*",
-    "tslint.json": "*",
-    "nx.json": "*"
-  },
-  "workspaceLayout": {
-    "appsDir": "apps",
-    "libsDir": "packages"
-  },
-  "cli": {
-    "defaultCollection": "@nrwl/workspace"
-  },
-  "tasksRunnerOptions": {
-    "default": {
-      "runner": "@nrwl/nx-cloud",
-      "options": {
-        "cacheableOperations": [
-          "build",
-          "build.all",
-          "lint",
-          "test",
-          "e2e"
-        ],
-        "accessToken": "ZjgxOTNkNmUtOGYwZS00MzJjLWIxNDgtYTg2MzY0MWMzMzUwfHJlYWQ="
-      }
-    }
-  }
+	"extends": "@nrwl/workspace/presets/core.json",
+	"npmScope": "edusperoni",
+	"affected": {
+		"defaultBase": "main"
+	},
+	"implicitDependencies": {
+		"workspace.json": "*",
+		"package.json": {
+			"dependencies": "*",
+			"devDependencies": "*"
+		},
+		"tsconfig.base.json": "*",
+		"tslint.json": "*",
+		"nx.json": "*"
+	},
+	"workspaceLayout": {
+		"appsDir": "apps",
+		"libsDir": "packages"
+	},
+	"cli": {
+		"defaultCollection": "@nrwl/workspace"
+	},
+	"tasksRunnerOptions": {
+		"default": {
+			"runner": "@nrwl/nx-cloud",
+			"options": {
+				"cacheableOperations": ["build", "build.all", "lint", "test", "e2e"],
+				"accessToken": "ZjgxOTNkNmUtOGYwZS00MzJjLWIxNDgtYTg2MzY0MWMzMzUwfHJlYWQ="
+			}
+		}
+	}
 }

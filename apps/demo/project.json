@@ -1,0 +1,102 @@
+{
+	"root": "apps/demo/",
+	"sourceRoot": "apps/demo/src",
+	"projectType": "application",
+	"prefix": "demo",
+	"targets": {
+		"build": {
+			"executor": "@nativescript/nx:build",
+			"options": {},
+			"dependsOn": [
+				{
+					"target": "build.all",
+					"projects": "dependencies"
+				},
+				{
+					"target": "build.all",
+					"projects": "dependencies"
+				}
+			]
+		},
+		"test": {
+			"executor": "@nativescript/nx:test",
+			"configurations": {
+				"android": {},
+				"ios": {}
+			},
+			"dependsOn": [
+				{
+					"target": "build.all",
+					"projects": "dependencies"
+				},
+				{
+					"target": "build.all",
+					"projects": "dependencies"
+				}
+			]
+		},
+		"ios": {
+			"executor": "@nativescript/nx:build",
+			"options": {
+				"platform": "ios"
+			},
+			"configurations": {
+				"build": {
+					"noHmr": true,
+					"production": true,
+					"uglify": true,
+					"release": false,
+					"forDevice": true
+				}
+			},
+			"dependsOn": [
+				{
+					"target": "build.all",
+					"projects": "dependencies"
+				},
+				{
+					"target": "build.all",
+					"projects": "dependencies"
+				}
+			]
+		},
+		"android": {
+			"executor": "@nativescript/nx:build",
+			"options": {
+				"platform": "android"
+			},
+			"configurations": {
+				"build": {
+					"noHmr": true,
+					"production": true,
+					"uglify": true,
+					"release": false,
+					"forDevice": true
+				}
+			},
+			"dependsOn": [
+				{
+					"target": "build.all",
+					"projects": "dependencies"
+				},
+				{
+					"target": "build.all",
+					"projects": "dependencies"
+				}
+			]
+		},
+		"clean": {
+			"executor": "@nativescript/nx:build",
+			"options": {
+				"clean": true
+			}
+		},
+		"lint": {
+			"executor": "@nrwl/linter:eslint",
+			"options": {
+				"lintFilePatterns": ["apps/demo/**/*.ts"]
+			}
+		}
+	},
+	"tags": []
+}

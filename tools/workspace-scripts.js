@@ -1,5 +1,3 @@
-const npsUtils = require('nps-utils');
-
 module.exports = {
 	message: 'NativeScript Plugins ~ made with ❤️  Choose a command to start...',
 	pageSize: 32,
@@ -109,7 +107,7 @@ module.exports = {
 			reset: {
 				script: 'nx g @nativescript/plugin-tools:focus-packages',
 				description: 'Reset Focus',
-			}
+			},
 		},
 		'.....................': {
 			script: `npx cowsay "That's all for now folks ~"`,

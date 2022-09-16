@@ -1,0 +1,66 @@
+{
+	"root": "packages/nativescript-mqtt",
+	"projectType": "library",
+	"sourceRoot": "packages/nativescript-mqtt",
+	"targets": {
+		"build": {
+			"executor": "@nrwl/js:tsc",
+			"options": {
+				"outputPath": "dist/packages/nativescript-mqtt",
+				"tsConfig": "packages/nativescript-mqtt/tsconfig.json",
+				"packageJson": "packages/nativescript-mqtt/package.json",
+				"main": "packages/nativescript-mqtt/index.ts",
+				"assets": [
+					"packages/nativescript-mqtt/*.md",
+					"packages/nativescript-mqtt/index.d.ts",
+					"packages/nativescript-mqtt/paho-mqtt.js",
+					"packages/nativescript-mqtt/paho-mqtt.d.ts",
+					"LICENSE",
+					{
+						"glob": "**/*",
+						"input": "packages/nativescript-mqtt/platforms/",
+						"output": "./platforms/"
+					}
+				]
+			},
+			"dependsOn": [
+				{
+					"target": "build.all",
+					"projects": "dependencies"
+				}
+			]
+		},
+		"build.all": {
+			"executor": "@nrwl/workspace:run-commands",
+			"outputs": ["dist/packages/nativescript-mqtt"],
+			"options": {
+				"commands": ["node tools/scripts/build-finish.ts nativescript-mqtt"],
+				"parallel": false
+			},
+			"dependsOn": [
+				{
+					"target": "build.all",
+					"projects": "dependencies"
+				},
+				{
+					"target": "build",
+					"projects": "self"
+				}
+			]
+		},
+		"focus": {
+			"executor": "@nrwl/workspace:run-commands",
+			"options": {
+				"commands": ["nx g @nativescript/plugin-tools:focus-packages nativescript-mqtt"],
+				"parallel": false
+			}
+		},
+		"lint": {
+			"executor": "@nrwl/linter:eslint",
+			"options": {
+				"lintFilePatterns": ["packages/nativescript-mqtt/**/*.ts"]
+			}
+		}
+	},
+	"tags": []
+}

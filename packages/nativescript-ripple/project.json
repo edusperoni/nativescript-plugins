@@ -1,0 +1,65 @@
+{
+	"root": "packages/nativescript-ripple",
+	"projectType": "library",
+	"sourceRoot": "packages/nativescript-ripple",
+	"targets": {
+		"build": {
+			"executor": "@nrwl/js:tsc",
+			"options": {
+				"outputPath": "dist/packages/nativescript-ripple",
+				"tsConfig": "packages/nativescript-ripple/tsconfig.json",
+				"packageJson": "packages/nativescript-ripple/package.json",
+				"main": "packages/nativescript-ripple/index.ts",
+				"assets": [
+					"packages/nativescript-ripple/*.md",
+					"packages/nativescript-ripple/index.d.ts",
+					"packages/nativescript-ripple/lib/ripple-helper.d.ts",
+					"LICENSE",
+					{
+						"glob": "**/*",
+						"input": "packages/nativescript-ripple/platforms/",
+						"output": "./platforms/"
+					}
+				]
+			},
+			"dependsOn": [
+				{
+					"target": "build.all",
+					"projects": "dependencies"
+				}
+			]
+		},
+		"build.all": {
+			"executor": "@nrwl/workspace:run-commands",
+			"outputs": ["dist/packages/nativescript-ripple"],
+			"options": {
+				"commands": ["node tools/scripts/build-finish.ts nativescript-ripple"],
+				"parallel": false
+			},
+			"dependsOn": [
+				{
+					"target": "build.all",
+					"projects": "dependencies"
+				},
+				{
+					"target": "build",
+					"projects": "self"
+				}
+			]
+		},
+		"focus": {
+			"executor": "@nrwl/workspace:run-commands",
+			"options": {
+				"commands": ["nx g @nativescript/plugin-tools:focus-packages nativescript-ripple"],
+				"parallel": false
+			}
+		},
+		"lint": {
+			"executor": "@nrwl/linter:eslint",
+			"options": {
+				"lintFilePatterns": ["packages/nativescript-ripple/**/*.ts"]
+			}
+		}
+	},
+	"tags": []
+}

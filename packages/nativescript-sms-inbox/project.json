@@ -1,0 +1,64 @@
+{
+	"root": "packages/nativescript-sms-inbox",
+	"projectType": "library",
+	"sourceRoot": "packages/nativescript-sms-inbox",
+	"targets": {
+		"build": {
+			"executor": "@nrwl/js:tsc",
+			"options": {
+				"outputPath": "dist/packages/nativescript-sms-inbox",
+				"tsConfig": "packages/nativescript-sms-inbox/tsconfig.json",
+				"packageJson": "packages/nativescript-sms-inbox/package.json",
+				"main": "packages/nativescript-sms-inbox/index.d.ts",
+				"assets": [
+					"packages/nativescript-sms-inbox/*.md",
+					"packages/nativescript-sms-inbox/index.d.ts",
+					"LICENSE",
+					{
+						"glob": "**/*",
+						"input": "packages/nativescript-sms-inbox/platforms/",
+						"output": "./platforms/"
+					}
+				]
+			},
+			"dependsOn": [
+				{
+					"target": "build.all",
+					"projects": "dependencies"
+				}
+			]
+		},
+		"build.all": {
+			"executor": "@nrwl/workspace:run-commands",
+			"outputs": ["dist/packages/nativescript-sms-inbox"],
+			"options": {
+				"commands": ["node tools/scripts/build-finish.ts nativescript-sms-inbox"],
+				"parallel": false
+			},
+			"dependsOn": [
+				{
+					"target": "build.all",
+					"projects": "dependencies"
+				},
+				{
+					"target": "build",
+					"projects": "self"
+				}
+			]
+		},
+		"focus": {
+			"executor": "@nrwl/workspace:run-commands",
+			"options": {
+				"commands": ["nx g @nativescript/plugin-tools:focus-packages nativescript-sms-inbox"],
+				"parallel": false
+			}
+		},
+		"lint": {
+			"executor": "@nrwl/linter:eslint",
+			"options": {
+				"lintFilePatterns": ["packages/nativescript-sms-inbox/**/*.ts"]
+			}
+		}
+	},
+	"tags": []
+}
