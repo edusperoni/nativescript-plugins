@@ -1,0 +1,61 @@
+name: Lint and Build (PR)
+
+env:
+  NX_BRANCH: ${{ github.event.number || github.ref_name }}
+  NX_CLOUD_ACCESS_TOKEN: ${{ secrets.NX_CLOUD_ACCESS_TOKEN }}
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  lint:
+    name: Lint affected projects
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v3
+        with:
+          node-version: lts/*
+      - uses: nrwl/nx-set-shas@v2
+        with:
+          main-branch-name: 'master'
+      - name: Setup global dependencies
+        run: npm i -g yarn
+      - name: Setup yarn cache
+        uses: c-hive/gha-yarn-cache@v2
+      - name: yarn install
+        run: yarn
+      - name: Lint affected
+        run: yarn nx affected:lint
+  build:
+    name: Build affected projects
+    needs: lint
+    # TODO: change this once we need native builds for iOS
+    # runs-on: macos-latest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v3
+        with:
+          node-version: lts/*
+      - uses: nrwl/nx-set-shas@v2
+        with:
+          main-branch-name: 'master'
+      - name: Setup global dependencies
+        run: npm i -g yarn
+      - name: Setup yarn cache
+        uses: c-hive/gha-yarn-cache@v2
+      - name: yarn install
+        run: yarn
+      - name: Build.all affected
+        run: yarn nx affected --target=build.all
