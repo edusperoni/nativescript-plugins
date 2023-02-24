@@ -1,5 +1,5 @@
 {
-	"extends": "@nrwl/workspace/presets/core.json",
+	"extends": "nx/presets/core.json",
 	"npmScope": "edusperoni",
 	"affected": {
 		"defaultBase": "main"
@@ -28,6 +28,25 @@
 				"cacheableOperations": ["build", "build.all", "lint", "test", "e2e"],
 				"accessToken": "ZjgxOTNkNmUtOGYwZS00MzJjLWIxNDgtYTg2MzY0MWMzMzUwfHJlYWQ="
 			}
+		}
+	},
+	"$schema": "./node_modules/nx/schemas/nx-schema.json",
+	"pluginsConfig": {
+		"@nrwl/js": {
+			"analyzeSourceFiles": true
+		}
+	},
+	"namedInputs": {
+		"default": ["{projectRoot}/**/*", "sharedGlobals"],
+		"sharedGlobals": ["{workspaceRoot}/workspace.json", "{workspaceRoot}/tsconfig.base.json", "{workspaceRoot}/tslint.json", "{workspaceRoot}/nx.json"],
+		"production": ["default", "!{projectRoot}/.eslintrc.json"]
+	},
+	"targetDefaults": {
+		"build": {
+			"inputs": ["production", "^production"]
+		},
+		"lint": {
+			"inputs": ["default", "{workspaceRoot}/.eslintrc.json"]
 		}
 	}
 }

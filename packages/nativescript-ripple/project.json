@@ -1,5 +1,6 @@
 {
-	"root": "packages/nativescript-ripple",
+	"name": "nativescript-ripple",
+	"$schema": "../../node_modules/nx/schemas/project-schema.json",
 	"projectType": "library",
 	"sourceRoot": "packages/nativescript-ripple",
 	"targets": {
@@ -30,8 +31,8 @@
 			]
 		},
 		"build.all": {
-			"executor": "@nrwl/workspace:run-commands",
-			"outputs": ["dist/packages/nativescript-ripple"],
+			"executor": "nx:run-commands",
+			"outputs": ["{workspaceRoot}/dist/packages/nativescript-ripple"],
 			"options": {
 				"commands": ["node tools/scripts/build-finish.ts nativescript-ripple"],
 				"parallel": false
@@ -48,7 +49,7 @@
 			]
 		},
 		"focus": {
-			"executor": "@nrwl/workspace:run-commands",
+			"executor": "nx:run-commands",
 			"options": {
 				"commands": ["nx g @nativescript/plugin-tools:focus-packages nativescript-ripple"],
 				"parallel": false

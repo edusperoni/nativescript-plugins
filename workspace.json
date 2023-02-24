@@ -6,5 +6,6 @@
 		"nativescript-mqtt": "packages/nativescript-mqtt",
 		"nativescript-ripple": "packages/nativescript-ripple",
 		"nativescript-sms-inbox": "packages/nativescript-sms-inbox"
-	}
+	},
+	"$schema": "./node_modules/nx/schemas/workspace-schema.json"
 }
