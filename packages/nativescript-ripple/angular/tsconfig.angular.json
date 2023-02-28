@@ -4,7 +4,7 @@
 		"types": ["node"],
 		"baseUrl": ".",
 		"paths": {
-			"@edusperoni/nativescript-ripple": ["../../../dist/packages/nativescript-ripple"]
+			"nativescript-ripple": ["../../../dist/packages/nativescript-ripple"]
 		},
 		"outDir": "../../../dist/out-tsc",
 		"declarationDir": "../../../dist/out-tsc"
