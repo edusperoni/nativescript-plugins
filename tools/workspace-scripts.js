@@ -23,15 +23,15 @@ module.exports = {
 			},
 			demo: {
 				clean: {
-					script: 'nx run demo:clean',
+					script: 'nx clean demo',
 					description: '⚆  Clean  🧹',
 				},
 				ios: {
-					script: 'nx run demo:ios',
+					script: 'nx debug demo ios',
 					description: '⚆  Run iOS  ',
 				},
 				android: {
-					script: 'nx run demo:android',
+					script: 'nx debug demo android',
 					description: '⚆  Run Android  🤖',
 				},
 			},
@@ -41,15 +41,15 @@ module.exports = {
 			},
 			'demo-angular': {
 				clean: {
-					script: 'nx run demo-angular:clean',
+					script: 'nx clean demo-angular',
 					description: '⚆  Clean  🧹',
 				},
 				ios: {
-					script: 'nx run demo-angular:ios',
+					script: 'nx debug demo-angular ios',
 					description: '⚆  Run iOS  ',
 				},
 				android: {
-					script: 'nx run demo-angular:android',
+					script: 'nx debug demo-angular android',
 					description: '⚆  Run Android  🤖',
 				},
 			},
@@ -75,11 +75,11 @@ module.exports = {
 					description: '@edusperoni/nativescript-mqtt: Build',
 				},
 			},
-			// @edusperoni/nativescript-ripple
+			// nativescript-ripple
 			'nativescript-ripple': {
 				build: {
 					script: 'nx run nativescript-ripple:build.all',
-					description: '@edusperoni/nativescript-ripple: Build',
+					description: 'nativescript-ripple: Build',
 				},
 			},
 			'build-all': {
@@ -102,7 +102,7 @@ module.exports = {
 			},
 			'nativescript-ripple': {
 				script: 'nx run nativescript-ripple:focus',
-				description: 'Focus on @edusperoni/nativescript-ripple',
+				description: 'Focus on nativescript-ripple',
 			},
 			reset: {
 				script: 'nx g @nativescript/plugin-tools:focus-packages',

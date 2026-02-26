@@ -5,7 +5,7 @@ This plugin aims to bring a native (or close to native) ripple implementation on
 ## Installation
 
 ```javascript
-tns plugin add @edusperoni/nativescript-ripple
+tns plugin add nativescript-ripple
 ```
 ## Usage 
 
@@ -19,7 +19,7 @@ This will only work on Android Lollipop 5.0 or later and any version of iOS.
 <Page class="page"
     navigatingTo="onNavigatingTo" 
     xmlns="http://schemas.nativescript.org/tns.xsd"
-    xmlns:RL="@edusperoni/nativescript-ripple">
+    xmlns:RL="nativescript-ripple">
     <ActionBar class="action-bar"><Label class="action-bar-title" text="Home"></Label></ActionBar>
     <ScrollView>
         <StackLayout>
@@ -71,7 +71,7 @@ This will only work on Android Lollipop 5.0 or later and any version of iOS.
 If you're using other modules that change the background (like https://github.com/Especializa/nativescript-ng-shadow), ensure to import it LAST, otherwise the Ripple background will be overwritten.
 
 ```	
-import { NgRippleModule } from '@edusperoni/nativescript-ripple/angular';
+import { NgRippleModule } from 'nativescript-ripple/angular';
 
 @NgModule({
     imports: [

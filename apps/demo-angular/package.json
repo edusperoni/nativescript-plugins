@@ -4,11 +4,11 @@
 		"@nativescript/core": "file:../../node_modules/@nativescript/core",
 		"@edusperoni/nativescript-sms-inbox": "file:../../packages/nativescript-sms-inbox",
 		"@edusperoni/nativescript-mqtt": "file:../../packages/nativescript-mqtt",
-		"@edusperoni/nativescript-ripple": "file:../../packages/nativescript-ripple",
+		"nativescript-ripple": "file:../../packages/nativescript-ripple",
 		"@valor/nativescript-websockets": "^1.0.3"
 	},
 	"devDependencies": {
-		"@nativescript/android": "~8.4.0",
-		"@nativescript/ios": "~8.4.0"
+		"@nativescript/android": "~8.9.0",
+		"@nativescript/ios": "~8.9.0"
 	}
 }

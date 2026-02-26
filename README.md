@@ -1,5 +1,5 @@
 - [@edusperoni/nativescript-mqtt](packages/nativescript-mqtt/README.md)
-- [@edusperoni/nativescript-ripple](packages/nativescript-ripple/README.md)
+- [nativescript-ripple](packages/nativescript-ripple/README.md)
 - [@edusperoni/nativescript-sms-inbox](packages/nativescript-sms-inbox/README.md)
 
 # How to use?

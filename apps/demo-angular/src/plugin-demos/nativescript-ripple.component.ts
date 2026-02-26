@@ -3,29 +3,28 @@ import { DemoSharedNativescriptRipple } from '@demo/shared';
 
 @Component({
 	selector: 'demo-nativescript-ripple',
+	standalone: false,
 	templateUrl: 'nativescript-ripple.component.html',
 })
 export class NativescriptRippleComponent {
-  
-  demoShared: DemoSharedNativescriptRipple;
+	demoShared: DemoSharedNativescriptRipple;
 
-  isGreen = true;
-  
+	isGreen = true;
+
 	constructor(private _ngZone: NgZone) {}
 
-  ngOnInit() {
-    this.demoShared = new DemoSharedNativescriptRipple();
-  }
+	ngOnInit() {
+		this.demoShared = new DemoSharedNativescriptRipple();
+	}
 
-  dummy(): void {
-    // dummy function
-  }
+	dummy(): void {
+		// dummy function
+	}
 
-  switchStyle() {
-      this.isGreen = !this.isGreen;
-  }
-  tapEvent() {
-      alert('Tap Event Works too');
-  }
-
+	switchStyle() {
+		this.isGreen = !this.isGreen;
+	}
+	tapEvent() {
+		alert('Tap Event Works too');
+	}
 }

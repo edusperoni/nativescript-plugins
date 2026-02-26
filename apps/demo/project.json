@@ -7,7 +7,9 @@
 	"targets": {
 		"build": {
 			"executor": "@nativescript/nx:build",
-			"options": {},
+			"options": {
+				"tsConfig": "apps/demo/tsconfig.json"
+			},
 			"dependsOn": [
 				{
 					"target": "build.all",
@@ -36,66 +38,24 @@
 				}
 			]
 		},
-		"ios": {
-			"executor": "@nativescript/nx:build",
-			"options": {
-				"platform": "ios"
-			},
-			"configurations": {
-				"build": {
-					"noHmr": true,
-					"production": true,
-					"uglify": true,
-					"release": false,
-					"forDevice": true
-				}
-			},
-			"dependsOn": [
-				{
-					"target": "build.all",
-					"projects": "dependencies"
-				},
-				{
-					"target": "build.all",
-					"projects": "dependencies"
-				}
-			]
-		},
-		"android": {
-			"executor": "@nativescript/nx:build",
-			"options": {
-				"platform": "android"
-			},
-			"configurations": {
-				"build": {
-					"noHmr": true,
-					"production": true,
-					"uglify": true,
-					"release": false,
-					"forDevice": true
-				}
-			},
-			"dependsOn": [
-				{
-					"target": "build.all",
-					"projects": "dependencies"
-				},
-				{
-					"target": "build.all",
-					"projects": "dependencies"
-				}
-			]
-		},
 		"clean": {
-			"executor": "@nativescript/nx:build",
-			"options": {
-				"clean": true
-			}
+			"executor": "@nativescript/nx:clean",
+			"options": {}
 		},
 		"lint": {
-			"executor": "@nrwl/linter:eslint",
+			"executor": "@nx/eslint:lint",
 			"options": {
 				"lintFilePatterns": ["apps/demo/**/*.ts"]
+			}
+		},
+		"debug": {
+			"executor": "@nativescript/nx:debug",
+			"options": {
+				"noHmr": true,
+				"uglify": false,
+				"release": false,
+				"forDevice": false,
+				"prepare": false
 			}
 		}
 	},

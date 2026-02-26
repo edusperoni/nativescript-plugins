@@ -7,8 +7,8 @@ import { Ripple } from 'nativescript-ripple';
 registerElement('Ripple', () => Ripple);
 
 @NgModule({
-	imports: [],
-	declarations: [NativeRippleDirective],
+	imports: [NativeRippleDirective],
+	declarations: [],
 	exports: [NativeRippleDirective],
 	providers: [],
 })
