@@ -1,15 +1,5 @@
 {
 	"extends": "nx/presets/core.json",
-	"implicitDependencies": {
-		"workspace.json": "*",
-		"package.json": {
-			"dependencies": "*",
-			"devDependencies": "*"
-		},
-		"tsconfig.base.json": "*",
-		"tslint.json": "*",
-		"nx.json": "*"
-	},
 	"workspaceLayout": {
 		"appsDir": "apps",
 		"libsDir": "packages"
