@@ -54,6 +54,12 @@
 			}
 		},
 		"debug": {
+			"dependsOn": [
+				{
+					"target": "build.all",
+					"projects": "nativescript-supabase"
+				}
+			],
 			"executor": "@nativescript/nx:debug",
 			"options": {
 				"noHmr": true,

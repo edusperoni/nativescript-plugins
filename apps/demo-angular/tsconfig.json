@@ -9,7 +9,8 @@
 			"nativescript-ripple": ["packages/nativescript-ripple/index.ts"],
 			"nativescript-ripple/angular": ["packages/nativescript-ripple/angular/index.ts"],
 			"@edusperoni/nativescript-sms-inbox": ["packages/nativescript-sms-inbox/index.d.ts"],
-			"~/*": ["apps/demo-angular/src/*"]
+			"~/*": ["apps/demo-angular/src/*"],
+			"@edusperoni/nativescript-supabase": ["../../packages/nativescript-supabase/index.ts"]
 		}
 	},
 	"files": ["./references.d.ts", "./src/main.ts", "./src/polyfills.ts"],
