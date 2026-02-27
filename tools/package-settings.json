@@ -1,0 +1,17 @@
+{
+	"name": "@edusperoni",
+	"repository": {
+		"type": "git",
+		"url": "http://github.com/edusperoni/nativescript-plugins.git"
+	},
+	"keywords": ["NativeScript", "JavaScript", "TypeScript", "iOS", "Android"],
+	"author": {
+		"name": "Eduardo Speroni",
+		"email": "edusperoni@gmail.com"
+	},
+	"bugs": {
+		"url": "http://github.com/edusperoni/nativescript-plugins/issues"
+	},
+	"license": "Apache-2.0",
+	"homepage": "http://github.com/edusperoni/nativescript-plugins"
+}

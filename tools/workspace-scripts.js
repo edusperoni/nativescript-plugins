@@ -82,6 +82,13 @@ module.exports = {
 					description: 'nativescript-ripple: Build',
 				},
 			},
+			// @edusperoni/nativescript-supabase
+			'nativescript-supabase': {
+				build: {
+					script: 'nx run nativescript-supabase:build.all',
+					description: '@edusperoni/nativescript-supabase: Build',
+				},
+			},
 			'build-all': {
 				script: 'nx run-many --all --target=build.all',
 				description: 'Build all packages',
@@ -103,6 +110,10 @@ module.exports = {
 			'nativescript-ripple': {
 				script: 'nx run nativescript-ripple:focus',
 				description: 'Focus on nativescript-ripple',
+			},
+			'nativescript-supabase': {
+				script: 'nx run nativescript-supabase:focus',
+				description: 'Focus on @edusperoni/nativescript-supabase',
 			},
 			reset: {
 				script: 'nx g @nativescript/plugin-tools:focus-packages',
