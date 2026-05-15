@@ -38,7 +38,7 @@ export interface NSSQLiteDriverDatabase {
 	select(sql: string, params?: any[]): Promise<Record<string, any>[]>;
 	selectArray(sql: string, params?: any[]): Promise<{ columns: string[]; rows: any[][] }>;
 
-	beginTransaction(): Promise<number>;
+	beginTransaction(behavior?: string): Promise<number>;
 	executeInTransaction(txId: number, sql: string, params?: any[]): Promise<void>;
 	selectInTransaction(txId: number, sql: string, params?: any[]): Promise<Record<string, any>[]>;
 	selectArrayInTransaction(txId: number, sql: string, params?: any[]): Promise<{ columns: string[]; rows: any[][] }>;
@@ -212,7 +212,7 @@ class NSSQLiteSession<TFullSchema extends Record<string, unknown>, TSchema exten
 	}
 
 	async transaction<T>(transaction: (tx: SQLiteTransaction<'async', NSSQLiteResult, TFullSchema, TSchema>) => Promise<T>, config?: SQLiteTransactionConfig): Promise<T> {
-		const txId = await this.client.beginTransaction();
+		const txId = await this.client.beginTransaction(config?.behavior);
 		const txSession = new NSSQLiteTxSession<TFullSchema, TSchema>(this.client, txId, this._dialect, this.schema, {
 			logger: this.logger,
 			cache: this.cache,

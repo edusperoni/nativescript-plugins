@@ -449,7 +449,8 @@ struct ReadTxHandle {
     std::atomic<int> _nextStmtId;
 
     std::mutex _txMutex;
-    std::unordered_map<int, bool> _activeTxIds;
+    bool _hasActiveWriteTx;
+    std::vector<std::pair<std::string, void (^)(int, NSError *)>> _pendingTxStarts;
 
     std::mutex _stmtMutex;
     std::unordered_map<int, PreparedStmtHandle> _preparedStmts;
@@ -481,6 +482,7 @@ struct ReadTxHandle {
     _readerIndex = 0;
     _nextTxId = 1;
     _nextStmtId = 1;
+    _hasActiveWriteTx = false;
 
     std::string error;
 
@@ -615,26 +617,47 @@ struct ReadTxHandle {
 
 // MARK: - Write Transactions
 
-- (void)beginTransaction:(void (^)(int, NSError *))completion {
-    int txId = _nextTxId.fetch_add(1);
-
-    {
-        std::lock_guard<std::mutex> lock(_txMutex);
-        _activeTxIds[txId] = true;
+- (void)beginTransaction:(NSString *)behavior
+              completion:(void (^)(int, NSError *))completion {
+    std::string beginSQL = "BEGIN";
+    if (behavior && behavior.length > 0) {
+        beginSQL += " ";
+        beginSQL += [behavior UTF8String];
     }
+
+    std::lock_guard<std::mutex> lock(_txMutex);
+    if (_hasActiveWriteTx) {
+        _pendingTxStarts.push_back({beginSQL, [completion copy]});
+        return;
+    }
+    _hasActiveWriteTx = true;
+    [self _startTransaction:beginSQL completion:completion];
+}
+
+- (void)_startTransaction:(const std::string &)beginSQL
+               completion:(void (^)(int, NSError *))completion {
+    int txId = _nextTxId.fetch_add(1);
+    std::string sql = beginSQL;
 
     dispatch_async(_writerQueue, ^{
         std::string error;
-        bool ok = self->_writerConn.execute("BEGIN IMMEDIATE", error);
-        NSError *nsError = ok ? nil : [self _errorWithMessage:error
-                                                         code:self->_writerConn.lastErrorCode()
-                                                 extendedCode:self->_writerConn.lastExtendedErrorCode()];
+        bool ok = self->_writerConn.execute(sql.c_str(), error);
         if (!ok) {
-            std::lock_guard<std::mutex> lock(self->_txMutex);
-            self->_activeTxIds.erase(txId);
+            {
+                std::lock_guard<std::mutex> lock(self->_txMutex);
+                self->_hasActiveWriteTx = false;
+            }
+            NSError *nsError = [self _errorWithMessage:error
+                                                  code:self->_writerConn.lastErrorCode()
+                                          extendedCode:self->_writerConn.lastExtendedErrorCode()];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(-1, nsError);
+            });
+            [self _flushPendingTransactions];
+            return;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
-            completion(ok ? txId : -1, nsError);
+            completion(txId, nil);
         });
     });
 }
@@ -698,7 +721,7 @@ struct ReadTxHandle {
         bool ok = self->_writerConn.execute("COMMIT", error);
         {
             std::lock_guard<std::mutex> lock(self->_txMutex);
-            self->_activeTxIds.erase(txId);
+            self->_hasActiveWriteTx = false;
         }
         NSError *nsError = ok ? nil : [self _errorWithMessage:error
                                                          code:self->_writerConn.lastErrorCode()
@@ -706,6 +729,7 @@ struct ReadTxHandle {
         dispatch_async(dispatch_get_main_queue(), ^{
             completion(nsError);
         });
+        [self _flushPendingTransactions];
     });
 }
 
@@ -716,12 +740,23 @@ struct ReadTxHandle {
         self->_writerConn.execute("ROLLBACK", error);
         {
             std::lock_guard<std::mutex> lock(self->_txMutex);
-            self->_activeTxIds.erase(txId);
+            self->_hasActiveWriteTx = false;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             completion(nil);
         });
+        [self _flushPendingTransactions];
     });
+}
+
+- (void)_flushPendingTransactions {
+    std::lock_guard<std::mutex> lock(_txMutex);
+    if (_pendingTxStarts.empty() || _hasActiveWriteTx) return;
+
+    auto next = _pendingTxStarts.front();
+    _pendingTxStarts.erase(_pendingTxStarts.begin());
+    _hasActiveWriteTx = true;
+    [self _startTransaction:next.first completion:next.second];
 }
 
 // MARK: - Read Transactions

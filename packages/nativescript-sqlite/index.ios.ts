@@ -12,7 +12,7 @@ declare class NSSQLiteDatabase extends NSObject {
 	selectParamsCompletion(sql: string, params: NSArray<any>, completion: (json: string, blobs: NSArray<NSData>, error: NSError) => void): void;
 	selectArrayParamsCompletion(sql: string, params: NSArray<any>, completion: (json: string, blobs: NSArray<NSData>, error: NSError) => void): void;
 
-	beginTransaction(completion: (txId: number, error: NSError) => void): void;
+	beginTransactionCompletion(behavior: string, completion: (txId: number, error: NSError) => void): void;
 	executeInTransactionSqlParamsCompletion(txId: number, sql: string, params: NSArray<any>, completion: (error: NSError) => void): void;
 	selectInTransactionSqlParamsCompletion(txId: number, sql: string, params: NSArray<any>, completion: (json: string, blobs: NSArray<NSData>, error: NSError) => void): void;
 	selectArrayInTransactionSqlParamsCompletion(txId: number, sql: string, params: NSArray<any>, completion: (json: string, blobs: NSArray<NSData>, error: NSError) => void): void;
@@ -317,7 +317,7 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 
 	async transaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> {
 		const txId = await new Promise<number>((resolve, reject) => {
-			this.native.beginTransaction((id, error) => {
+			this.native.beginTransactionCompletion('deferred', (id, error) => {
 				if (error) {
 					reject(toNSError(error));
 				} else {
@@ -414,9 +414,9 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 
 	// Low-level transaction control for driver integrations
 
-	beginTransaction(): Promise<number> {
+	beginTransaction(behavior?: string): Promise<number> {
 		return new Promise((resolve, reject) => {
-			this.native.beginTransaction((id, error) => {
+			this.native.beginTransactionCompletion(behavior ?? 'deferred', (id, error) => {
 				if (error) {
 					reject(toNSError(error));
 				} else {
