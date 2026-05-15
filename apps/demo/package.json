@@ -10,7 +10,8 @@
 		"@nativescript/core": "file:../../node_modules/@nativescript/core",
 		"@nativescript/unit-test-runner": "^3.0.2",
 		"@valor/nativescript-websockets": "^1.0.3",
-		"@edusperoni/nativescript-supabase": "file:../../packages/nativescript-supabase"
+		"@edusperoni/nativescript-supabase": "file:../../packages/nativescript-supabase",
+		"@edusperoni/nativescript-sqlite": "file:../../packages/nativescript-sqlite"
 	},
 	"devDependencies": {
 		"@nativescript/android": "~8.9.0",
