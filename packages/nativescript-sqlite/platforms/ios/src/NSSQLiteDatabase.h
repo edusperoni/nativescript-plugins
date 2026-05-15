@@ -25,7 +25,8 @@
 
 // --- Write transactions ---
 
-- (void)beginTransaction:(void (^)(int, NSError *))completion;
+- (void)beginTransaction:(NSString *)behavior
+              completion:(void (^)(int, NSError *))completion;
 
 - (void)executeInTransaction:(int)txId
                          sql:(NSString *)sql

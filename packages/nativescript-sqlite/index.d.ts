@@ -39,7 +39,7 @@ export interface SQLiteDatabase {
 	getSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T | undefined;
 
 	// Low-level transaction control (for driver integrations like drizzle)
-	beginTransaction(): Promise<number>;
+	beginTransaction(behavior?: 'deferred' | 'immediate' | 'exclusive'): Promise<number>;
 	executeInTransaction(txId: number, sql: string, params?: SQLiteParams): Promise<void>;
 	selectInTransaction(txId: number, sql: string, params?: SQLiteParams): Promise<SQLiteRow[]>;
 	selectArrayInTransaction(txId: number, sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult>;
