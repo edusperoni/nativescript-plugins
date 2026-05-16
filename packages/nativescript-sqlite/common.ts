@@ -61,6 +61,7 @@ export interface DatabaseOptions {
 	readOnly?: boolean;
 	poolSize?: number;
 	busyTimeout?: number;
+	encryptionKey?: string;
 }
 
 export class SQLiteError extends Error {

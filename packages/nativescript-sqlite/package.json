@@ -1,6 +1,6 @@
 {
 	"name": "@edusperoni/nativescript-sqlite",
-	"version": "0.0.2",
+	"version": "0.0.3",
 	"description": "Add a plugin description",
 	"main": "index",
 	"types": "index.d.ts",

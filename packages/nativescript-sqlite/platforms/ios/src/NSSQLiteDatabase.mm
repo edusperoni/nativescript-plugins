@@ -85,7 +85,7 @@ public:
 
     sqlite3 *handle() const { return db_; }
 
-    bool open(const std::string &path, int flags, int busyTimeoutMs, std::string &outError) {
+    bool open(const std::string &path, int flags, int busyTimeoutMs, const std::string &encryptionKey, std::string &outError) {
         int rc = sqlite3_open_v2(path.c_str(), &db_, flags, nullptr);
         if (rc != SQLITE_OK) {
             outError = db_ ? sqlite3_errmsg(db_) : "Failed to allocate memory for database";
@@ -95,6 +95,20 @@ public:
         path_ = path;
         sqlite3_extended_result_codes(db_, 1);
         sqlite3_busy_timeout(db_, busyTimeoutMs);
+
+        if (!encryptionKey.empty()) {
+            std::string pragmaSQL = "PRAGMA key = '" + encryptionKey + "'";
+            char *errMsg = nullptr;
+            rc = sqlite3_exec(db_, pragmaSQL.c_str(), nullptr, nullptr, &errMsg);
+            if (rc != SQLITE_OK) {
+                outError = errMsg ? errMsg : "Failed to set encryption key";
+                if (errMsg) sqlite3_free(errMsg);
+                sqlite3_close(db_);
+                db_ = nullptr;
+                return false;
+            }
+        }
+
         return true;
     }
 
@@ -441,6 +455,7 @@ struct ReadTxHandle {
     std::atomic<int> _readerIndex;
 
     std::string _path;
+    std::string _encryptionKey;
     int _busyTimeoutMs;
     BOOL _readOnly;
     BOOL _isOpen;
@@ -463,9 +478,10 @@ struct ReadTxHandle {
 + (instancetype)openWithPath:(NSString *)path
                     poolSize:(int)poolSize
                     readOnly:(BOOL)readOnly
-                 busyTimeout:(int)busyTimeoutMs {
+                 busyTimeout:(int)busyTimeoutMs
+               encryptionKey:(NSString *)encryptionKey {
     NSSQLiteDatabase *db = [[NSSQLiteDatabase alloc] init];
-    if (![db _openWithPath:path poolSize:poolSize readOnly:readOnly busyTimeout:busyTimeoutMs]) {
+    if (![db _openWithPath:path poolSize:poolSize readOnly:readOnly busyTimeout:busyTimeoutMs encryptionKey:encryptionKey]) {
         return nil;
     }
     return db;
@@ -474,10 +490,12 @@ struct ReadTxHandle {
 - (BOOL)_openWithPath:(NSString *)path
              poolSize:(int)poolSize
              readOnly:(BOOL)readOnly
-          busyTimeout:(int)busyTimeoutMs {
+          busyTimeout:(int)busyTimeoutMs
+        encryptionKey:(NSString *)encryptionKey {
     _path = [path UTF8String];
     _busyTimeoutMs = busyTimeoutMs;
     _readOnly = readOnly;
+    _encryptionKey = encryptionKey ? [encryptionKey UTF8String] : "";
     _syncConnOpened = false;
     _readerIndex = 0;
     _nextTxId = 1;
@@ -490,7 +508,7 @@ struct ReadTxHandle {
         ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX)
         : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX);
 
-    if (!_writerConn.open(_path, writerFlags, busyTimeoutMs, error)) {
+    if (!_writerConn.open(_path, writerFlags, busyTimeoutMs, _encryptionKey, error)) {
         NSLog(@"[NSSQLiteDatabase] Failed to open writer: %s", error.c_str());
         return NO;
     }
@@ -508,13 +526,20 @@ struct ReadTxHandle {
 
     if (poolSize < 1) poolSize = 1;
 
+    // Readers open as READWRITE so they can initialize WAL shared memory (SHM).
+    // READONLY connections cannot create/map the SHM file, which causes "unable to
+    // open database file" errors when the DB is already in WAL mode.
+    // PRAGMA query_only=ON prevents accidental writes through these connections.
     for (int i = 0; i < poolSize; i++) {
         auto *reader = new SQLiteConnection();
-        int readerFlags = SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX;
-        if (!reader->open(_path, readerFlags, busyTimeoutMs, error)) {
+        int readerFlags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) | SQLITE_OPEN_NOMUTEX;
+        if (!reader->open(_path, readerFlags, busyTimeoutMs, _encryptionKey, error)) {
             NSLog(@"[NSSQLiteDatabase] Failed to open reader %d: %s", i, error.c_str());
             delete reader;
             continue;
+        }
+        if (!readOnly) {
+            reader->execute("PRAGMA query_only=ON", error);
         }
         _readerConns.push_back(reader);
         _readerAvailable.push_back(true);
@@ -1103,7 +1128,7 @@ struct ReadTxHandle {
         ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX)
         : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX);
 
-    if (!_syncConn.open(_path, flags, _busyTimeoutMs, err)) {
+    if (!_syncConn.open(_path, flags, _busyTimeoutMs, _encryptionKey, err)) {
         if (error) *error = [self _errorWithMessage:err code:SQLITE_CANTOPEN extendedCode:SQLITE_CANTOPEN];
         return NO;
     }
@@ -1155,48 +1180,118 @@ struct ReadTxHandle {
 
 // MARK: - Close
 
-- (void)close {
-    if (!_isOpen) return;
+- (void)closeWithCompletion:(void (^)(void))completion {
+    if (!_isOpen) {
+        if (completion) {
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(); });
+        }
+        return;
+    }
     _isOpen = NO;
 
+    // Reject pending queued transactions
     {
-        std::lock_guard<std::mutex> lock(_stmtMutex);
-        for (auto &pair : _preparedStmts) {
-            sqlite3_finalize(pair.second.stmt);
+        std::lock_guard<std::mutex> lock(_txMutex);
+        for (auto &pending : _pendingTxStarts) {
+            auto cb = pending.second;
+            NSError *error = [self _errorWithMessage:"Database is closing" code:SQLITE_MISUSE extendedCode:SQLITE_MISUSE];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                cb(-1, error);
+            });
         }
-        _preparedStmts.clear();
+        _pendingTxStarts.clear();
+        _hasActiveWriteTx = false;
     }
 
+    dispatch_group_t group = dispatch_group_create();
+
+    // Drain writer queue: rollback active tx if any, finalize statements, close connection
+    dispatch_group_enter(group);
+    dispatch_async(_writerQueue, ^{
+        // Rollback any active transaction
+        std::string err;
+        if (sqlite3_get_autocommit(self->_writerConn.handle()) == 0) {
+            self->_writerConn.execute("ROLLBACK", err);
+        }
+
+        // Finalize prepared statements owned by the writer
+        {
+            std::lock_guard<std::mutex> lock(self->_stmtMutex);
+            for (auto &pair : self->_preparedStmts) {
+                sqlite3_finalize(pair.second.stmt);
+            }
+            self->_preparedStmts.clear();
+        }
+
+        self->_writerConn.close();
+        dispatch_group_leave(group);
+    });
+
+    // Drain each reader queue: end read transactions, close connections
+    std::vector<ReadTxHandle> activeReadTxs;
     {
         std::lock_guard<std::mutex> lock(_readTxMutex);
         for (auto &pair : _readTxHandles) {
-            std::string err;
-            pair.second.conn->execute("END", err);
+            activeReadTxs.push_back(pair.second);
         }
         _readTxHandles.clear();
     }
 
-    dispatch_sync(_writerQueue, ^{
-        self->_writerConn.close();
-    });
-
     for (size_t i = 0; i < _readerConns.size(); i++) {
-        dispatch_sync(_readerQueues[i], ^{
+        dispatch_group_enter(group);
+        dispatch_async(_readerQueues[i], ^{
+            // End any active read transaction on this reader
+            for (auto &rtx : activeReadTxs) {
+                if (rtx.readerIndex == (int)i) {
+                    std::string err;
+                    rtx.conn->execute("END", err);
+                }
+            }
             self->_readerConns[i]->close();
             delete self->_readerConns[i];
+            dispatch_group_leave(group);
         });
     }
-    _readerConns.clear();
-    _readerQueues.clear();
 
-    if (_syncConnOpened) {
-        _syncConn.close();
-        _syncConnOpened = false;
-    }
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+        self->_readerConns.clear();
+        self->_readerQueues.clear();
+
+        if (self->_syncConnOpened) {
+            self->_syncConn.close();
+            self->_syncConnOpened = false;
+        }
+
+        if (completion) {
+            completion();
+        }
+    });
+}
+
+- (void)close {
+    [self closeWithCompletion:nil];
 }
 
 - (void)dealloc {
-    [self close];
+    if (_isOpen) {
+        _isOpen = NO;
+        // Best-effort synchronous cleanup in dealloc
+        {
+            std::lock_guard<std::mutex> lock(_stmtMutex);
+            for (auto &pair : _preparedStmts) {
+                sqlite3_finalize(pair.second.stmt);
+            }
+            _preparedStmts.clear();
+        }
+        _writerConn.close();
+        for (size_t i = 0; i < _readerConns.size(); i++) {
+            _readerConns[i]->close();
+            delete _readerConns[i];
+        }
+        if (_syncConnOpened) {
+            _syncConn.close();
+        }
+    }
 }
 
 // MARK: - Error Helpers
