@@ -7,6 +7,7 @@ export interface ReadTransaction {
 	select<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T[]>;
 	selectArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>>;
 	get<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T | undefined>;
+	getArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>>;
 }
 
 export interface Transaction extends ReadTransaction {
@@ -19,6 +20,7 @@ export interface PreparedStatement {
 	select<T extends SQLiteRow = SQLiteRow>(params?: SQLiteParams): Promise<T[]>;
 	selectArray<T extends SQLiteValue[] = SQLiteValue[]>(params?: SQLiteParams): Promise<SQLiteArrayResult<T>>;
 	get<T extends SQLiteRow = SQLiteRow>(params?: SQLiteParams): Promise<T | undefined>;
+	getArray<T extends SQLiteValue[] = SQLiteValue[]>(params?: SQLiteParams): Promise<SQLiteArrayResult<T>>;
 	finalize(): Promise<void>;
 }
 
@@ -27,6 +29,7 @@ export interface SQLiteDatabase {
 	select<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T[]>;
 	selectArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>>;
 	get<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T | undefined>;
+	getArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>>;
 
 	transaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T>;
 	readTransaction<T>(fn: (tx: ReadTransaction) => Promise<T>): Promise<T>;
@@ -37,6 +40,7 @@ export interface SQLiteDatabase {
 	selectSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T[];
 	selectArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T>;
 	getSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T | undefined;
+	getArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T>;
 
 	// Low-level transaction control (for driver integrations like drizzle)
 	beginTransaction(behavior?: 'deferred' | 'immediate' | 'exclusive'): Promise<number>;
@@ -46,7 +50,7 @@ export interface SQLiteDatabase {
 	commitTransaction(txId: number): Promise<void>;
 	rollbackTransaction(txId: number): Promise<void>;
 
-	close(): void;
+	close(): Promise<void>;
 	readonly isOpen: boolean;
 }
 

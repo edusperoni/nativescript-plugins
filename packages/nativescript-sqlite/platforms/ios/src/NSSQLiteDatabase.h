@@ -5,7 +5,8 @@
 + (instancetype)openWithPath:(NSString *)path
                     poolSize:(int)poolSize
                     readOnly:(BOOL)readOnly
-                 busyTimeout:(int)busyTimeoutMs;
+                 busyTimeout:(int)busyTimeoutMs
+               encryptionKey:(NSString *)encryptionKey;
 
 // --- Async operations (dispatch to GCD, callback on main queue) ---
 
@@ -102,6 +103,7 @@
 
 // --- Lifecycle ---
 
+- (void)closeWithCompletion:(void (^)(void))completion;
 - (void)close;
 
 @property (nonatomic, readonly) BOOL isOpen;

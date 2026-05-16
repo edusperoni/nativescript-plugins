@@ -6,7 +6,7 @@ export type { PreparedStatement, ReadTransaction, SQLiteDatabase, Transaction };
 export * from './common';
 
 declare class NSSQLiteDatabase extends NSObject {
-	static openWithPathPoolSizeReadOnlyBusyTimeout(path: string, poolSize: number, readOnly: boolean, busyTimeout: number): NSSQLiteDatabase;
+	static openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKey(path: string, poolSize: number, readOnly: boolean, busyTimeout: number, encryptionKey: string | null): NSSQLiteDatabase;
 
 	executeParamsCompletion(sql: string, params: NSArray<any>, completion: (error: NSError) => void): void;
 	selectParamsCompletion(sql: string, params: NSArray<any>, completion: (json: string, blobs: NSArray<NSData>, error: NSError) => void): void;
@@ -34,6 +34,7 @@ declare class NSSQLiteDatabase extends NSObject {
 	selectSyncParamsError(sql: string, params: NSArray<any>): string;
 	selectArraySyncParamsError(sql: string, params: NSArray<any>): string;
 
+	closeWithCompletion(completion: () => void): void;
 	close(): void;
 	isOpen: boolean;
 }
@@ -160,6 +161,10 @@ class WriteTxImpl implements Transaction {
 		return this.select<T>(sql, params).then((rows) => rows[0]);
 	}
 
+	getArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>> {
+		return this.selectArray<T>(sql, params).then((r) => ({ columns: r.columns, rows: r.rows.slice(0, 1) }));
+	}
+
 	async savepoint<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> {
 		const name = `sp_${this._savepointCounter.value++}`;
 		await this.execute(`SAVEPOINT ${name}`);
@@ -207,6 +212,10 @@ class ReadTxImpl implements ReadTransaction {
 	get<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T | undefined> {
 		return this.select<T>(sql, params).then((rows) => rows[0]);
 	}
+
+	getArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>> {
+		return this.selectArray<T>(sql, params).then((r) => ({ columns: r.columns, rows: r.rows.slice(0, 1) }));
+	}
 }
 
 class PreparedStatementImpl implements PreparedStatement {
@@ -253,6 +262,10 @@ class PreparedStatementImpl implements PreparedStatement {
 
 	get<T extends SQLiteRow = SQLiteRow>(params?: SQLiteParams): Promise<T | undefined> {
 		return this.select<T>(params).then((rows) => rows[0]);
+	}
+
+	getArray<T extends SQLiteValue[] = SQLiteValue[]>(params?: SQLiteParams): Promise<SQLiteArrayResult<T>> {
+		return this.selectArray<T>(params).then((r) => ({ columns: r.columns, rows: r.rows.slice(0, 1) }));
 	}
 
 	finalize(): Promise<void> {
@@ -313,6 +326,10 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 
 	get<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T | undefined> {
 		return this.select<T>(sql, params).then((rows) => rows[0]);
+	}
+
+	getArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>> {
+		return this.selectArray<T>(sql, params).then((r) => ({ columns: r.columns, rows: r.rows.slice(0, 1) }));
 	}
 
 	async transaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> {
@@ -412,6 +429,10 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 		return this.selectSync<T>(sql, params)[0];
 	}
 
+	getArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T> {
+		return this.selectArraySync<T>(sql, params);
+	}
+
 	// Low-level transaction control for driver integrations
 
 	beginTransaction(behavior?: string): Promise<number> {
@@ -480,13 +501,17 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 		});
 	}
 
-	close(): void {
-		this.native.close();
+	close(): Promise<void> {
+		return new Promise((resolve) => {
+			this.native.closeWithCompletion(() => {
+				resolve();
+			});
+		});
 	}
 }
 
 export function openDatabase(options: DatabaseOptions): SQLiteDatabase {
-	const native = NSSQLiteDatabase.openWithPathPoolSizeReadOnlyBusyTimeout(options.path, options.poolSize ?? 4, options.readOnly ?? false, options.busyTimeout ?? 5000);
+	const native = NSSQLiteDatabase.openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKey(options.path, options.poolSize ?? 4, options.readOnly ?? false, options.busyTimeout ?? 5000, options.encryptionKey ?? null);
 	if (!native) {
 		throw new SQLiteError(`Failed to open database: ${options.path}`, -1);
 	}

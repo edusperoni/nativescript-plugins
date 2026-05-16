@@ -8,17 +8,27 @@ A high-performance SQLite plugin for NativeScript. All database operations run o
 
 - Fully asynchronous — all queries dispatch to native background threads
 - Connection pool with WAL mode — concurrent reads, serialized writes
+- Transaction queue — concurrent `transaction()` calls are safe, they wait their turn
 - Write and read transactions with savepoint (nested transaction) support
 - Prepared statements
 - Two result formats: objects (`select`) or columnar arrays (`selectArray`)
 - Synchronous API available for simple use cases (migrations, setup)
 - Custom SQLite builds supported via CocoaPods
+- Drizzle ORM driver included
 
 ## Installation
 
 ```bash
 npm install @edusperoni/nativescript-sqlite
 ```
+
+The plugin does not bundle SQLite — you must link one. For most apps, add to `App_Resources/iOS/build.xcconfig`:
+
+```
+OTHER_LDFLAGS = $(inherited) -lsqlite3
+```
+
+For other options (custom builds, SQLCipher encryption), see [SQLite Linking](#sqlite-linking).
 
 ## Quick Start
 
@@ -55,7 +65,7 @@ const user = await db.get('SELECT * FROM users WHERE id = ?', [1]);
 // => { id: 1, name: "Alice", ... } or undefined
 
 // Clean up
-db.close();
+await db.close();
 ```
 
 ## API Reference
@@ -98,8 +108,13 @@ const result = await db.selectArray(sql, params?);
 // result.columns => ['id', 'name', 'age']
 // result.rows    => [[1, 'Alice', 30], [2, 'Bob', 25]]
 
-// Query a single row
+// Query a single row as an object
 const row = await db.get<MyType>(sql, params?);
+
+// Query a single row as a columnar array
+const rowArr = await db.getArray(sql, params?);
+// rowArr.columns => ['id', 'name', 'age']
+// rowArr.rows    => [[1, 'Alice', 30]]  (or [] if no match)
 ```
 
 #### Sync Methods
@@ -111,14 +126,17 @@ db.executeSync(sql, params?);
 const rows = db.selectSync<MyType>(sql, params?);
 const result = db.selectArraySync(sql, params?);
 const row = db.getSync<MyType>(sql, params?);
+const rowArr = db.getArraySync(sql, params?);
 ```
 
 #### Lifecycle
 
 ```typescript
-db.isOpen;   // boolean
-db.close();  // closes all connections, finalizes all prepared statements
+db.isOpen;        // boolean
+await db.close(); // waits for in-flight operations to finish, then closes all connections
 ```
+
+`close()` is async — it waits for all queued operations on the writer and reader queues to drain, rolls back any active write transaction, finalizes prepared statements, and rejects any pending queued transactions. The returned Promise resolves when everything is fully shut down.
 
 ### Parameters
 
@@ -155,7 +173,7 @@ The prefix (`:`, `$`, `@`) is added automatically if omitted — you can pass `{
 
 #### Write Transactions
 
-Write transactions use the writer connection with `BEGIN IMMEDIATE`, ensuring an exclusive write lock from the start. They are serialized — concurrent calls to `transaction()` will queue automatically.
+Write transactions use `BEGIN DEFERRED` by default. They are serialized through a transaction queue — concurrent calls to `transaction()` are safe and will wait their turn automatically.
 
 ```typescript
 const userId = await db.transaction(async (tx) => {
@@ -168,10 +186,10 @@ const userId = await db.transaction(async (tx) => {
 
 If the callback throws, the transaction is rolled back. If it completes normally, it is committed. The return value of the callback is forwarded to the caller.
 
-**Concurrent transactions** are safe — the second transaction's `BEGIN IMMEDIATE` queues behind the first's `COMMIT` on the writer's serial dispatch queue:
+**Concurrent transactions** are safe — the second transaction waits for the first to finish before starting:
 
 ```typescript
-// Both run, but writes are serialized
+// Both run, but writes are serialized via the transaction queue
 const [r1, r2] = await Promise.all([
   db.transaction(async (tx) => { /* ... */ }),
   db.transaction(async (tx) => { /* ... */ }),
@@ -230,9 +248,9 @@ await stmt.finalize(); // release native resources
 
 Prepared statements are automatically finalized when the database is closed, but it is good practice to finalize them explicitly when no longer needed.
 
-### `selectArray` — Columnar Result Format
+### `selectArray` / `getArray` — Columnar Result Format
 
-`selectArray` returns column names once and rows as arrays of values. This is more efficient for large result sets since column names are not repeated per row.
+`selectArray` and `getArray` return column names once and rows as arrays of values. This is more efficient than `select`/`get` for large result sets since column names are not repeated per row.
 
 ```typescript
 const result = await db.selectArray<[number, string, number]>(
@@ -243,9 +261,14 @@ console.log(result.columns); // ['id', 'name', 'age']
 for (const [id, name, age] of result.rows) {
   console.log(id, name, age);
 }
+
+// Single row variant
+const single = await db.getArray('SELECT id, name FROM users WHERE id = ?', [1]);
+// single.columns => ['id', 'name']
+// single.rows    => [[1, 'Alice']]  (or [] if no match)
 ```
 
-Available on all contexts: `db.selectArray()`, `db.selectArraySync()`, `tx.selectArray()`, `stmt.selectArray()`.
+Available on all contexts: `db.selectArray()`, `db.getArray()`, `db.selectArraySync()`, `db.getArraySync()`, `tx.selectArray()`, `tx.getArray()`, `stmt.selectArray()`, `stmt.getArray()`.
 
 ### Error Handling
 
@@ -265,6 +288,48 @@ try {
 }
 ```
 
+### Low-Level Transaction Control
+
+For driver integrations (e.g., drizzle), the database exposes `txId`-based methods that allow external transaction management:
+
+```typescript
+const txId = await db.beginTransaction('deferred'); // 'deferred' | 'immediate' | 'exclusive'
+await db.executeInTransaction(txId, 'INSERT INTO users (name) VALUES (?)', ['Alice']);
+const rows = await db.selectInTransaction(txId, 'SELECT * FROM users');
+await db.commitTransaction(txId);
+// or: await db.rollbackTransaction(txId);
+```
+
+These are used by the drizzle driver to scope each drizzle transaction to its own `txId`, enabling safe concurrent transactions through `Promise.all`.
+
+## Drizzle ORM Integration
+
+A custom drizzle driver is included. It creates a dedicated session per transaction, so concurrent transactions are fully isolated.
+
+```typescript
+import { drizzle } from '@edusperoni/nativescript-sqlite/drizzle-driver';
+import { openDatabase } from '@edusperoni/nativescript-sqlite';
+import * as schema from './schema';
+
+const sqlite = openDatabase({ path: '...' });
+const db = drizzle(sqlite, { schema });
+
+// Standard drizzle usage
+const users = await db.select().from(schema.users);
+
+// Transactions — concurrent calls are safe
+await Promise.all([
+  db.transaction(async (tx) => {
+    await tx.insert(schema.users).values({ name: 'Alice' });
+  }),
+  db.transaction(async (tx) => {
+    await tx.insert(schema.users).values({ name: 'Bob' });
+  }),
+]);
+```
+
+Requires `drizzle-orm` as a peer dependency (`>=0.45.0`).
+
 ## Architecture
 
 ### Connection Pool
@@ -272,8 +337,9 @@ try {
 The plugin opens multiple SQLite connections to the same database file:
 
 - **1 writer connection** — opened with `SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE`. All writes (`execute`, write transactions) dispatch to a serial GCD queue, ensuring only one write happens at a time.
-- **N reader connections** — opened with `SQLITE_OPEN_READONLY`. Reads (`select`, `get`) are distributed across readers via round-robin, each with its own serial GCD queue. Multiple reads can run concurrently on different readers.
+- **N reader connections** — opened with `SQLITE_OPEN_READWRITE` + `PRAGMA query_only=ON`. Reads (`select`, `get`) are distributed across readers via round-robin, each with its own serial GCD queue. Multiple reads can run concurrently on different readers. Readers open as READWRITE so they can initialize WAL shared memory, but `query_only` prevents accidental writes.
 - **1 sync connection** — opened lazily on the first sync call. Used exclusively by `executeSync`/`selectSync`/`getSync` on the main thread.
+- **Transaction queue** — concurrent `transaction()` calls are queued. The next transaction's `BEGIN` only dispatches after the previous one commits or rolls back.
 
 WAL (Write-Ahead Logging) mode is enabled automatically on the writer. WAL allows readers to proceed without blocking writes, and writes to proceed without blocking readers.
 
@@ -282,24 +348,50 @@ WAL (Write-Ahead Logging) mode is enabled automatically on the writer. WAL allow
 - All SQLite work (prepare, bind, step, column extraction) happens on background GCD threads.
 - Results are serialized to a JSON string on the background thread. Only one value (the string) crosses the native-to-JS bridge. `JSON.parse` in V8 is highly optimized native C++ code.
 - Blob columns are returned as separate `NSData` objects and converted to `ArrayBuffer` via `interop.bufferFromData` (no extra copy).
-- The `selectArray` format avoids repeating column names per row, reducing both serialization cost and memory usage for large result sets.
+- The `selectArray` / `getArray` format avoids repeating column names per row, reducing both serialization cost and memory usage for large result sets.
 
-## Custom SQLite Builds
+## SQLite Linking
 
-By default, the plugin links against the system `libsqlite3` shipped with iOS. This SQLite version may lack features like the recovery extension, FTS5 tokenizer customization, or other compile-time options.
+The plugin does **not** bundle or link a SQLite library — you must provide one. This gives you full control over the SQLite version and features available. Add **one** of the following to your app:
 
-To use a custom SQLite build:
+### Option A: System SQLite (simplest)
 
-1. Add a SQLite pod to your app's `App_Resources/iOS/Podfile`:
+Link the SQLite that ships with iOS. Add to `App_Resources/iOS/build.xcconfig`:
+
+```
+OTHER_LDFLAGS = $(inherited) -lsqlite3
+```
+
+This is the simplest setup. The system SQLite does not support encryption or some newer extensions (e.g., recovery).
+
+### Option B: Custom SQLite via CocoaPods
+
+Use a custom SQLite build with specific compile-time options (FTS5, recovery, etc.). Add to `App_Resources/iOS/Podfile`:
 
 ```ruby
 pod 'sqlite3', '~> 3.46.0'
-# or a custom podspec with your own SQLite build
 ```
 
-2. The pod's symbols will override the system SQLite at link time. No plugin code changes are needed — it calls the same C API functions regardless of the underlying implementation.
+Or use your own podspec pointing to a custom SQLite build. The pod's sqlite3 symbols replace the system ones at link time. No plugin code changes needed.
 
-This is how you enable features like `sqlite3_recover_*` for database recovery.
+### Option C: SQLCipher (encryption)
+
+Use SQLCipher for transparent AES-256 database encryption. Add to `App_Resources/iOS/Podfile`:
+
+```ruby
+pod 'SQLCipher', '~> 4.6'
+```
+
+Then pass an encryption key when opening the database:
+
+```typescript
+const db = openDatabase({
+  path: knownFolders.documents().path + '/encrypted.sqlite',
+  encryptionKey: 'my-secret-key',
+});
+```
+
+Every connection in the pool (writer, readers, sync) automatically receives the key via `PRAGMA key` after opening. If the key is wrong or missing for an encrypted database, operations will fail with `SQLITE_NOTADB`.
 
 ## Type Definitions
 
@@ -318,6 +410,7 @@ interface DatabaseOptions {
   readOnly?: boolean;
   poolSize?: number;
   busyTimeout?: number;
+  encryptionKey?: string;
 }
 ```
 
