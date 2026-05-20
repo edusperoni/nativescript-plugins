@@ -1,8 +1,35 @@
 <ActionBar title="nativescript-sqlite" class="action-bar"> </ActionBar>
 <StackLayout class="p-20">
-	<ScrollView class="h-full">
-		<StackLayout>
-			<Button text="Test nativescript-sqlite" (tap)="demoShared.testIt()" class="btn btn-primary"></Button>
+	<!-- Rotating square — stays smooth as long as the UI thread is free -->
+	<StackLayout class="h-full" orientation="vertical">
+		<StackLayout orientation="horizontal" horizontalAlignment="center" class="m-b-10 p-10">
+			<StackLayout #spinner width="60" height="60" backgroundColor="#3d5afe" borderRadius="8" class="m-r-10 m-10"></StackLayout>
+			<Label text="UI thread free ✓" verticalAlignment="center" fontSize="14" color="#3d5afe"></Label>
 		</StackLayout>
-	</ScrollView>
+		<ScrollView>
+			<StackLayout>
+				<Label text="─── Tests ───" class="h3 text-center m-b-10"></Label>
+				<Button text="Run All Tests" (tap)="demoShared.testAll()" class="btn btn-primary m-b-5"></Button>
+				<Button text="CRUD" (tap)="demoShared.testCRUD()" class="btn btn-outline m-b-5"></Button>
+				<Button text="Data Types (NULL/INT/REAL/TEXT/BLOB)" (tap)="demoShared.testDataTypes()" class="btn btn-outline m-b-5"></Button>
+				<Button text="Parameter Binding (positional &amp; named)" (tap)="demoShared.testParams()" class="btn btn-outline m-b-5"></Button>
+				<Button text="selectArray / getArray" (tap)="demoShared.testSelectArray()" class="btn btn-outline m-b-5"></Button>
+				<Button text="Transactions &amp; Savepoints" (tap)="demoShared.testTransactions()" class="btn btn-outline m-b-5"></Button>
+				<Button text="Prepared Statements" (tap)="demoShared.testPreparedStatements()" class="btn btn-outline m-b-5"></Button>
+				<Button text="Sync API" (tap)="demoShared.testSyncAPI()" class="btn btn-outline m-b-5"></Button>
+				<Button text="Error Handling" (tap)="demoShared.testErrorHandling()" class="btn btn-outline m-b-5"></Button>
+				<Button text="getRuntimeInfo" (tap)="demoShared.testRuntimeInfo()" class="btn btn-outline m-b-5"></Button>
+				<Button text="In-Memory Database" (tap)="demoShared.testInMemoryDB()" class="btn btn-outline m-b-5"></Button>
+				<Button text="Low-Level Transaction API" (tap)="demoShared.testLowLevelTransactions()" class="btn btn-outline m-b-5"></Button>
+				<Button text="SQLCipher (Android optional dep)" (tap)="demoShared.testSQLCipher()" class="btn btn-outline m-b-5"></Button>
+
+				<Label text="─── Benchmarks ───" class="h3 text-center m-t-20 m-b-10"></Label>
+				<Button text="Run All Benchmarks" (tap)="demoShared.benchmarkAll()" class="btn btn-primary m-b-5"></Button>
+				<Button text="Bulk Insert (autocommit vs tx vs prepared)" (tap)="demoShared.benchmarkBulkInsert()" class="btn btn-outline m-b-5"></Button>
+				<Button text="Bulk Select (object vs array vs sync)" (tap)="demoShared.benchmarkBulkSelect()" class="btn btn-outline m-b-5"></Button>
+				<Button text="Concurrent Reads (pool)" (tap)="demoShared.benchmarkConcurrentReads()" class="btn btn-outline m-b-5"></Button>
+				<Button text="Prepared vs Direct" (tap)="demoShared.benchmarkPreparedVsDirect()" class="btn btn-outline m-b-5"></Button>
+			</StackLayout>
+		</ScrollView>
+	</StackLayout>
 </StackLayout>

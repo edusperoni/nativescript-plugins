@@ -64,6 +64,65 @@ export interface DatabaseOptions {
 	encryptionKey?: string;
 }
 
+export interface RuntimeInfo {
+	version: string;
+	sourceId: string;
+	compileOptions: string[];
+}
+
+export interface ReadTransaction {
+	select<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T[]>;
+	selectArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>>;
+	get<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T | undefined>;
+	getArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>>;
+}
+
+export interface Transaction extends ReadTransaction {
+	execute(sql: string, params?: SQLiteParams): Promise<void>;
+	savepoint<T>(fn: (tx: Transaction) => Promise<T>): Promise<T>;
+}
+
+export interface PreparedStatement {
+	execute(params?: SQLiteParams): Promise<void>;
+	select<T extends SQLiteRow = SQLiteRow>(params?: SQLiteParams): Promise<T[]>;
+	selectArray<T extends SQLiteValue[] = SQLiteValue[]>(params?: SQLiteParams): Promise<SQLiteArrayResult<T>>;
+	get<T extends SQLiteRow = SQLiteRow>(params?: SQLiteParams): Promise<T | undefined>;
+	getArray<T extends SQLiteValue[] = SQLiteValue[]>(params?: SQLiteParams): Promise<SQLiteArrayResult<T>>;
+	finalize(): Promise<void>;
+}
+
+export interface SQLiteDatabase {
+	execute(sql: string, params?: SQLiteParams): Promise<void>;
+	select<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T[]>;
+	selectArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>>;
+	get<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T | undefined>;
+	getArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>>;
+
+	transaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T>;
+	readTransaction<T>(fn: (tx: ReadTransaction) => Promise<T>): Promise<T>;
+
+	prepare(sql: string): Promise<PreparedStatement>;
+
+	executeSync(sql: string, params?: SQLiteParams): void;
+	selectSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T[];
+	selectArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T>;
+	getSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T | undefined;
+	getArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T>;
+
+	// Low-level transaction control (for driver integrations like drizzle)
+	beginTransaction(behavior?: 'deferred' | 'immediate' | 'exclusive'): Promise<number>;
+	executeInTransaction(txId: number, sql: string, params?: SQLiteParams): Promise<void>;
+	selectInTransaction(txId: number, sql: string, params?: SQLiteParams): Promise<SQLiteRow[]>;
+	selectArrayInTransaction(txId: number, sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult>;
+	commitTransaction(txId: number): Promise<void>;
+	rollbackTransaction(txId: number): Promise<void>;
+
+	getRuntimeInfo(): RuntimeInfo;
+
+	close(): Promise<void>;
+	readonly isOpen: boolean;
+}
+
 export class SQLiteError extends Error {
 	constructor(
 		message: string,

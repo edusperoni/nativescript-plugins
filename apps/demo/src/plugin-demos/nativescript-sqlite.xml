@@ -6,8 +6,27 @@
     <StackLayout class="p-20">
         <ScrollView class="h-full">
           <StackLayout>
-            <Button text="Test nativescript-sqlite" tap="{{ testIt }}" class="btn btn-primary"/>
+            <Label text="─── Tests ───" class="h3 text-center m-b-10"/>
+            <Button text="Run All Tests" tap="{{ testAll }}" class="btn btn-primary m-b-5"/>
+            <Button text="CRUD" tap="{{ testCRUD }}" class="btn btn-outline m-b-5"/>
+            <Button text="Data Types (NULL/INT/REAL/TEXT/BLOB)" tap="{{ testDataTypes }}" class="btn btn-outline m-b-5"/>
+            <Button text="Parameter Binding (positional &amp; named)" tap="{{ testParams }}" class="btn btn-outline m-b-5"/>
+            <Button text="selectArray / getArray" tap="{{ testSelectArray }}" class="btn btn-outline m-b-5"/>
+            <Button text="Transactions &amp; Savepoints" tap="{{ testTransactions }}" class="btn btn-outline m-b-5"/>
+            <Button text="Prepared Statements" tap="{{ testPreparedStatements }}" class="btn btn-outline m-b-5"/>
+            <Button text="Sync API" tap="{{ testSyncAPI }}" class="btn btn-outline m-b-5"/>
+            <Button text="Error Handling" tap="{{ testErrorHandling }}" class="btn btn-outline m-b-5"/>
+            <Button text="getRuntimeInfo" tap="{{ testRuntimeInfo }}" class="btn btn-outline m-b-5"/>
+            <Button text="In-Memory Database" tap="{{ testInMemoryDB }}" class="btn btn-outline m-b-5"/>
+            <Button text="Low-Level Transaction API" tap="{{ testLowLevelTransactions }}" class="btn btn-outline m-b-5"/>
+            <Button text="SQLCipher (Android optional dep)" tap="{{ testSQLCipher }}" class="btn btn-outline m-b-5"/>
 
+            <Label text="─── Benchmarks ───" class="h3 text-center m-t-20 m-b-10"/>
+            <Button text="Run All Benchmarks" tap="{{ benchmarkAll }}" class="btn btn-primary m-b-5"/>
+            <Button text="Bulk Insert (autocommit vs tx vs prepared)" tap="{{ benchmarkBulkInsert }}" class="btn btn-outline m-b-5"/>
+            <Button text="Bulk Select (object vs array vs sync)" tap="{{ benchmarkBulkSelect }}" class="btn btn-outline m-b-5"/>
+            <Button text="Concurrent Reads (pool)" tap="{{ benchmarkConcurrentReads }}" class="btn btn-outline m-b-5"/>
+            <Button text="Prepared vs Direct" tap="{{ benchmarkPreparedVsDirect }}" class="btn btn-outline m-b-5"/>
           </StackLayout>
         </ScrollView>
     </StackLayout>

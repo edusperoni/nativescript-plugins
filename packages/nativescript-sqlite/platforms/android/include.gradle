@@ -1,0 +1,107 @@
+def sqliteImpl = project.hasProperty('nscsqlite.sqliteImpl')
+                 ? project.property('nscsqlite.sqliteImpl')
+                 : 'bundled'
+
+def sqliteIncludeDir = project.hasProperty('nscsqlite.sqliteIncludeDir')
+                       ? project.property('nscsqlite.sqliteIncludeDir')
+                       : ''
+
+def sqliteLibDir = project.hasProperty('nscsqlite.sqliteLibDir')
+                   ? project.property('nscsqlite.sqliteLibDir')
+                   : ''
+
+def sqliteLibName = project.hasProperty('nscsqlite.sqliteLibName')
+                    ? project.property('nscsqlite.sqliteLibName')
+                    : 'sqlite3'
+
+def sqliteFlags = project.hasProperty('nscsqlite.sqliteFlags')
+                  ? project.property('nscsqlite.sqliteFlags')
+                  : ''
+
+def findNsAndroidDir(project) {
+    def dir = project.rootProject.projectDir
+    while (dir != null) {
+        def candidate = new File(dir, "node_modules/@nativescript/android/framework")
+        if (candidate.exists()) return candidate.parentFile
+        dir = dir.parentFile
+    }
+    return null
+}
+
+def nsStubsDir = null
+def nsAndroidDir = findNsAndroidDir(project)
+if (nsAndroidDir) {
+    def aarFile = new File(nsAndroidDir, "framework/app/libs/runtime-libs/nativescript-regular.aar")
+    if (aarFile.exists()) {
+        def extractDir = new File(project.buildDir, "ns-stubs")
+        def abis = ['arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64']
+        def allExist = abis.every { abi ->
+            new File(extractDir, "${abi}/libNativeScript.so").exists()
+        }
+        if (!allExist) {
+            def zipFile = new java.util.zip.ZipFile(aarFile)
+            try {
+                abis.each { abi ->
+                    def entry = zipFile.getEntry("jni/${abi}/libNativeScript.so")
+                    if (entry) {
+                        def outDir = new File(extractDir, abi)
+                        outDir.mkdirs()
+                        def outFile = new File(outDir, "libNativeScript.so")
+                        def inStream = zipFile.getInputStream(entry)
+                        outFile.bytes = inStream.bytes
+                        inStream.close()
+                    }
+                }
+            } finally {
+                zipFile.close()
+            }
+        }
+        nsStubsDir = extractDir.absolutePath
+    }
+}
+
+def cmakeArgs = [
+    "-DMYLIB_SQLITE_IMPL=${sqliteImpl}",
+    "-DMYLIB_SQLITE_INCLUDE_DIR=${sqliteIncludeDir}",
+    "-DMYLIB_SQLITE_LIB_DIR=${sqliteLibDir}",
+    "-DMYLIB_SQLITE_LIB_NAME=${sqliteLibName}",
+    "-DMYLIB_SQLITE_FLAGS=${sqliteFlags}"
+]
+
+if (nsStubsDir) {
+    cmakeArgs << "-DNS_LIBS_DIR=${nsStubsDir}"
+}
+
+if (sqliteImpl == 'sqlcipher') {
+    cmakeArgs << "-DANDROID_STL=c++_shared"
+}
+
+android {
+    externalNativeBuild {
+        cmake {
+            path new File(buildscript.sourceFile.parentFile, "native/CMakeLists.txt").absolutePath
+        }
+    }
+
+    defaultConfig {
+        externalNativeBuild {
+            cmake {
+                arguments(*cmakeArgs)
+            }
+        }
+    }
+
+    if (sqliteImpl == 'sqlcipher') {
+        buildFeatures {
+            prefab true
+        }
+    }
+}
+
+if (sqliteImpl == 'sqlcipher') {
+    dependencies {
+        // OpenSSL provided via Android NDK prefab; consumed by CMake as openssl::crypto
+        // TODO: Use LibTomCrypt instead of OpenSSL
+        implementation 'com.android.ndk.thirdparty:openssl:1.1.1q-beta-1'
+    }
+}
