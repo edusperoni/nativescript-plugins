@@ -1,7 +1,7 @@
-import { DatabaseOptions, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue } from './common';
+import { DatabaseOptions, RuntimeInfo, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue } from './common';
 import type { PreparedStatement, ReadTransaction, SQLiteDatabase, Transaction } from '.';
 
-export { DatabaseOptions, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue };
+export { DatabaseOptions, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, RuntimeInfo };
 export type { PreparedStatement, ReadTransaction, SQLiteDatabase, Transaction };
 export * from './common';
 
@@ -499,6 +499,14 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 		return new Promise((resolve) => {
 			this.native.rollbackTransactionCompletion(txId, () => resolve());
 		});
+	}
+
+	getRuntimeInfo(): RuntimeInfo {
+		return {
+			version: '3.x',
+			sourceId: 'ios-stub',
+			compileOptions: [],
+		};
 	}
 
 	close(): Promise<void> {

@@ -2,7 +2,7 @@
 
 A high-performance SQLite plugin for NativeScript. All database operations run on background threads via GCD — the JavaScript thread is never blocked.
 
-**Platform support:** iOS (Android planned)
+**Platform support:** iOS, Android
 
 ## Features
 
@@ -13,7 +13,8 @@ A high-performance SQLite plugin for NativeScript. All database operations run o
 - Prepared statements
 - Two result formats: objects (`select`) or columnar arrays (`selectArray`)
 - Synchronous API available for simple use cases (migrations, setup)
-- Custom SQLite builds supported via CocoaPods
+- Custom SQLite builds supported (CocoaPods on iOS, Gradle on Android)
+- Optional SQLCipher encryption on both platforms
 - Drizzle ORM driver included
 
 ## Installation
@@ -22,13 +23,15 @@ A high-performance SQLite plugin for NativeScript. All database operations run o
 npm install @edusperoni/nativescript-sqlite
 ```
 
-The plugin does not bundle SQLite — you must link one. For most apps, add to `App_Resources/iOS/build.xcconfig`:
+**iOS:** The plugin does not bundle SQLite — you must link one. For most apps add to `App_Resources/iOS/build.xcconfig`:
 
 ```
 OTHER_LDFLAGS = $(inherited) -lsqlite3
 ```
 
-For other options (custom builds, SQLCipher encryption), see [SQLite Linking](#sqlite-linking).
+**Android:** The Android SDK ships with SQLite built-in — no extra setup needed. For encryption see [Android SQLite Setup](#android-sqlite-setup).
+
+For all linking options see [iOS SQLite Linking](#ios-sqlite-linking) and [Android SQLite Setup](#android-sqlite-setup).
 
 ## Quick Start
 
@@ -83,12 +86,12 @@ const db = openDatabase({
 });
 ```
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `path` | `string` | *required* | Full path to the database file, or `":memory:"` |
-| `readOnly` | `boolean` | `false` | Open in read-only mode |
-| `poolSize` | `number` | `4` | Number of reader connections in the pool |
-| `busyTimeout` | `number` | `5000` | Busy timeout in milliseconds |
+| Option          | Type        | Default      | Description                                       |
+| --------------- | ----------- | ------------ | ------------------------------------------------- |
+| `path`        | `string`  | *required* | Full path to the database file, or `":memory:"` |
+| `readOnly`    | `boolean` | `false`    | Open in read-only mode                            |
+| `poolSize`    | `number`  | `4`        | Number of reader connections in the pool          |
+| `busyTimeout` | `number`  | `5000`     | Busy timeout in milliseconds                      |
 
 ### SQLiteDatabase
 
@@ -161,13 +164,13 @@ The prefix (`:`, `$`, `@`) is added automatically if omitted — you can pass `{
 
 **Supported value types:**
 
-| JS Type | SQLite Type |
-|---------|-------------|
-| `string` | TEXT |
-| `number` | INTEGER or REAL (auto-detected) |
-| `boolean` | INTEGER (0 or 1) |
-| `null` | NULL |
-| `ArrayBuffer` | BLOB |
+| JS Type         | SQLite Type                     |
+| --------------- | ------------------------------- |
+| `string`      | TEXT                            |
+| `number`      | INTEGER or REAL (auto-detected) |
+| `boolean`     | INTEGER (0 or 1)                |
+| `null`        | NULL                            |
+| `ArrayBuffer` | BLOB                            |
 
 ### Transactions
 
@@ -345,14 +348,15 @@ WAL (Write-Ahead Logging) mode is enabled automatically on the writer. WAL allow
 
 ### Performance
 
-- All SQLite work (prepare, bind, step, column extraction) happens on background GCD threads.
+- All SQLite work (prepare, bind, step, column extraction) happens on background threads.
 - Results are serialized to a JSON string on the background thread. Only one value (the string) crosses the native-to-JS bridge. `JSON.parse` in V8 is highly optimized native C++ code.
-- Blob columns are returned as separate `NSData` objects and converted to `ArrayBuffer` via `interop.bufferFromData` (no extra copy).
+- Blob columns are returned separately (iOS: `NSData`→`ArrayBuffer` via `interop.bufferFromData`; Android: `byte[]`→`ArrayBuffer` by direct copy) and re-inserted into the parsed objects before the Promise resolves.
 - The `selectArray` / `getArray` format avoids repeating column names per row, reducing both serialization cost and memory usage for large result sets.
+- Named parameters (`:name`, `$name`, `@name`) are bound natively on both platforms via `sqlite3_bind_parameter_index`. The prefix is added automatically if omitted — pass `{ name: 'Alice' }` and the binding adds the `:` before looking up the parameter index.
 
-## SQLite Linking
+## iOS SQLite Linking
 
-The plugin does **not** bundle or link a SQLite library — you must provide one. This gives you full control over the SQLite version and features available. Add **one** of the following to your app:
+The plugin does **not** bundle or link a SQLite library on iOS — you must provide one. This gives you full control over the SQLite version and features available. Add **one** of the following to your app:
 
 ### Option A: System SQLite (simplest)
 
@@ -392,6 +396,54 @@ const db = openDatabase({
 ```
 
 Every connection in the pool (writer, readers, sync) automatically receives the key via `PRAGMA key` after opening. If the key is wrong or missing for an encrypted database, operations will fail with `SQLITE_NOTADB`.
+
+## Android SQLite Setup
+
+This package uses a 100% native C++ architecture on Android and provides three ways to link SQLite. Configure via `App_Resources/Android/gradle.properties`.
+
+### Option A: Bundled SQLite (Default)
+
+By default, the plugin compiles and statically links its own bundled copy of the SQLite C amalgamation (`sqlite3.c`). This ensures a consistent, up-to-date version across all Android devices regardless of OS version.
+
+You can pass extra C compile flags to the bundled build:
+
+```properties
+# App_Resources/Android/gradle.properties
+nscsqlite.sqliteImpl=bundled
+nscsqlite.sqliteFlags=-DSQLITE_ENABLE_FTS5;-DSQLITE_ENABLE_JSON1
+```
+
+### Option B: SQLCipher (Encryption)
+
+The plugin ships a bundled SQLCipher amalgamation that provides transparent AES-256-CBC encryption via OpenSSL. Selecting this option statically links SQLCipher instead of plain SQLite — no separate `.so` or pod required.
+
+```properties
+# App_Resources/Android/gradle.properties
+nscsqlite.sqliteImpl=sqlcipher
+```
+
+Then pass an encryption key when opening the database:
+
+```typescript
+const db = openDatabase({
+  path: knownFolders.documents().path + '/encrypted.sqlite',
+  encryptionKey: 'my-secret-passphrase',
+});
+```
+
+Every connection in the pool automatically receives the key via `PRAGMA key` after opening. If the key is wrong or missing for an encrypted database, operations fail with `SQLITE_NOTADB`.
+
+### Option C: Custom Build
+
+Link against any pre-built SQLite-compatible shared library (`.so`) you supply — useful for a heavily customized SQLite build or a third-party distribution. Place ABI subdirectories (`arm64-v8a/`, `x86_64/`, etc.) under `sqliteLibDir`.
+
+```properties
+# App_Resources/Android/gradle.properties
+nscsqlite.sqliteImpl=custom
+nscsqlite.sqliteLibName=sqlite3
+nscsqlite.sqliteIncludeDir=/path/to/include
+nscsqlite.sqliteLibDir=/path/to/libs
+```
 
 ## Type Definitions
 
