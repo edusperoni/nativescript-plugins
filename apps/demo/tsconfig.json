@@ -10,7 +10,8 @@
 			"@edusperoni/nativescript-sms-inbox": ["../../packages/nativescript-sms-inbox/index.d.ts"],
 			"@demo/shared": ["../../tools/demo/index.ts"],
 			"nativescript-ripple/angular": ["../../packages/nativescript-ripple/angular/index.ts"],
-			"@edusperoni/nativescript-supabase": ["../../packages/nativescript-supabase/index.ts"]
+			"@edusperoni/nativescript-supabase": ["../../packages/nativescript-supabase/index.ts"],
+			"@edusperoni/nativescript-sqlite": ["../../packages/nativescript-sqlite/index.d.ts"]
 		}
 	},
 	"exclude": ["**/*.spec.ts"]

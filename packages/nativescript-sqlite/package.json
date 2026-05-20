@@ -1,0 +1,43 @@
+{
+	"name": "@edusperoni/nativescript-sqlite",
+	"version": "0.0.3",
+	"description": "Add a plugin description",
+	"main": "index",
+	"types": "index.d.ts",
+	"nativescript": {
+		"platforms": {
+			"ios": "6.0.0",
+			"android": "6.0.0"
+		}
+	},
+	"repository": {
+		"type": "git",
+		"url": "http://github.com/edusperoni/nativescript-plugins.git"
+	},
+	"keywords": [
+		"NativeScript",
+		"JavaScript",
+		"TypeScript",
+		"iOS",
+		"Android"
+	],
+	"author": {
+		"name": "Eduardo Speroni",
+		"email": "edusperoni@gmail.com"
+	},
+	"bugs": {
+		"url": "http://github.com/edusperoni/nativescript-plugins/issues"
+	},
+	"peerDependencies": {
+		"drizzle-orm": ">=0.45.0"
+	},
+	"peerDependenciesMeta": {
+		"drizzle-orm": {
+			"optional": true
+		}
+	},
+	"license": "Apache-2.0",
+	"homepage": "http://github.com/edusperoni/nativescript-plugins",
+	"readmeFilename": "README.md",
+	"bootstrapper": "@nativescript/plugin-seed"
+}
