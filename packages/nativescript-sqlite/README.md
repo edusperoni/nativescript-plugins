@@ -87,8 +87,19 @@ const db = openDatabase({
 |--------|------|---------|-------------|
 | `path` | `string` | *required* | Full path to the database file, or `":memory:"` |
 | `readOnly` | `boolean` | `false` | Open in read-only mode |
-| `poolSize` | `number` | `4` | Number of reader connections in the pool |
+| `poolSize` | `number` | `4` | Number of reader connections in the pool (ignored in serialized mode) |
 | `busyTimeout` | `number` | `5000` | Busy timeout in milliseconds |
+| `serialized` | `boolean` | auto | Use a single serialized connection instead of the reader pool. Defaults to `true` for in-memory databases, `false` otherwise |
+
+> **In-memory databases:** passing `":memory:"` (or an empty path) defaults to **serialized mode** — a single connection handles all reads, writes, transactions, and sync calls. This is required because a pool of separate connections cannot share a private in-memory database. In serialized mode at most one transaction is active at a time and reads never run concurrently with writes. Each `openDatabase(":memory:")` call gets its own isolated database.
+>
+> To run a connection *pool* over an in-memory database instead, set `serialized: false` and pass a [`memdb` VFS](https://sqlite.org/uri.html) URI (SQLite ≥ 3.36, i.e. iOS 15+) so the pooled connections share one database:
+>
+> ```ts
+> openDatabase({ path: 'file:/mydb?vfs=memdb', serialized: false });
+> ```
+>
+> Prefer `memdb` over the older `?mode=memory&cache=shared` (shared-cache) form: shared cache uses table-level locking and returns `SQLITE_LOCKED` on contention, which `busyTimeout` does **not** retry; `memdb` returns a retryable `SQLITE_BUSY` instead. The shared in-memory database lives only while at least one connection is open (the pool keeps it alive), and is destroyed once the database is closed. The URI name must begin with `/`.
 
 ### SQLiteDatabase
 

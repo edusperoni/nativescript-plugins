@@ -1,4 +1,4 @@
-import { DatabaseOptions, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue } from './common';
+import { DatabaseOptions, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, isInMemoryPath } from './common';
 import type { PreparedStatement, ReadTransaction, SQLiteDatabase, Transaction } from '.';
 
 export { DatabaseOptions, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue };
@@ -6,7 +6,7 @@ export type { PreparedStatement, ReadTransaction, SQLiteDatabase, Transaction };
 export * from './common';
 
 declare class NSSQLiteDatabase extends NSObject {
-	static openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKey(path: string, poolSize: number, readOnly: boolean, busyTimeout: number, encryptionKey: string | null): NSSQLiteDatabase;
+	static openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeySerialized(path: string, poolSize: number, readOnly: boolean, busyTimeout: number, encryptionKey: string | null, serialized: boolean): NSSQLiteDatabase;
 
 	executeParamsCompletion(sql: string, params: NSArray<any>, completion: (error: NSError) => void): void;
 	selectParamsCompletion(sql: string, params: NSArray<any>, completion: (json: string, blobs: NSArray<NSData>, error: NSError) => void): void;
@@ -511,7 +511,8 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 }
 
 export function openDatabase(options: DatabaseOptions): SQLiteDatabase {
-	const native = NSSQLiteDatabase.openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKey(options.path, options.poolSize ?? 4, options.readOnly ?? false, options.busyTimeout ?? 5000, options.encryptionKey ?? null);
+	const serialized = options.serialized ?? isInMemoryPath(options.path);
+	const native = NSSQLiteDatabase.openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeySerialized(options.path, options.poolSize ?? 4, options.readOnly ?? false, options.busyTimeout ?? 5000, options.encryptionKey ?? null, serialized);
 	if (!native) {
 		throw new SQLiteError(`Failed to open database: ${options.path}`, -1);
 	}

@@ -6,7 +6,8 @@
                     poolSize:(int)poolSize
                     readOnly:(BOOL)readOnly
                  busyTimeout:(int)busyTimeoutMs
-               encryptionKey:(NSString *)encryptionKey;
+               encryptionKey:(NSString *)encryptionKey
+                  serialized:(BOOL)serialized;
 
 // --- Async operations (dispatch to GCD, callback on main queue) ---
 

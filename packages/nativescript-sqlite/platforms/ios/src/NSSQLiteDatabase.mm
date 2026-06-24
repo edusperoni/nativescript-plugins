@@ -459,6 +459,7 @@ struct ReadTxHandle {
     int _busyTimeoutMs;
     BOOL _readOnly;
     BOOL _isOpen;
+    bool _serialized;
 
     std::atomic<int> _nextTxId;
     std::atomic<int> _nextStmtId;
@@ -479,9 +480,10 @@ struct ReadTxHandle {
                     poolSize:(int)poolSize
                     readOnly:(BOOL)readOnly
                  busyTimeout:(int)busyTimeoutMs
-               encryptionKey:(NSString *)encryptionKey {
+               encryptionKey:(NSString *)encryptionKey
+                  serialized:(BOOL)serialized {
     NSSQLiteDatabase *db = [[NSSQLiteDatabase alloc] init];
-    if (![db _openWithPath:path poolSize:poolSize readOnly:readOnly busyTimeout:busyTimeoutMs encryptionKey:encryptionKey]) {
+    if (![db _openWithPath:path poolSize:poolSize readOnly:readOnly busyTimeout:busyTimeoutMs encryptionKey:encryptionKey serialized:serialized]) {
         return nil;
     }
     return db;
@@ -491,7 +493,9 @@ struct ReadTxHandle {
              poolSize:(int)poolSize
              readOnly:(BOOL)readOnly
           busyTimeout:(int)busyTimeoutMs
-        encryptionKey:(NSString *)encryptionKey {
+        encryptionKey:(NSString *)encryptionKey
+           serialized:(BOOL)serialized {
+    _serialized = serialized;
     _path = [path UTF8String];
     _busyTimeoutMs = busyTimeoutMs;
     _readOnly = readOnly;
@@ -504,15 +508,20 @@ struct ReadTxHandle {
 
     std::string error;
 
-    int writerFlags = readOnly
+    // SQLITE_OPEN_URI is always safe to set: SQLite only applies URI parsing to
+    // filenames that begin with "file:" (e.g. "file:/db?vfs=memdb"); any other
+    // path — even one containing "?" — is treated as an ordinary filename.
+    int writerFlags = (readOnly
         ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX)
-        : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX);
+        : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX)) | SQLITE_OPEN_URI;
 
     if (!_writerConn.open(_path, writerFlags, busyTimeoutMs, _encryptionKey, error)) {
         NSLog(@"[NSSQLiteDatabase] Failed to open writer: %s", error.c_str());
         return NO;
     }
 
+    // Enable WAL for read/write databases. For in-memory databases the pragma is
+    // a harmless no-op (journal mode stays "memory").
     if (!readOnly) {
         if (!_writerConn.configureWAL(error)) {
             NSLog(@"[NSSQLiteDatabase] Failed to enable WAL: %s", error.c_str());
@@ -526,13 +535,20 @@ struct ReadTxHandle {
 
     if (poolSize < 1) poolSize = 1;
 
+    // Serialized mode: no reader pool. All reads, writes, transactions and sync
+    // operations run on the single writer connection via _writerQueue.
+    if (serialized) {
+        _isOpen = YES;
+        return YES;
+    }
+
     // Readers open as READWRITE so they can initialize WAL shared memory (SHM).
     // READONLY connections cannot create/map the SHM file, which causes "unable to
     // open database file" errors when the DB is already in WAL mode.
     // PRAGMA query_only=ON prevents accidental writes through these connections.
     for (int i = 0; i < poolSize; i++) {
         auto *reader = new SQLiteConnection();
-        int readerFlags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) | SQLITE_OPEN_NOMUTEX;
+        int readerFlags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI;
         if (!reader->open(_path, readerFlags, busyTimeoutMs, _encryptionKey, error)) {
             NSLog(@"[NSSQLiteDatabase] Failed to open reader %d: %s", i, error.c_str());
             delete reader;
@@ -609,6 +625,11 @@ struct ReadTxHandle {
 - (void)select:(NSString *)sql
         params:(NSArray *)params
     completion:(void (^)(NSString *, NSArray<NSData *> *, NSError *))completion {
+    // Serialized mode (or an empty pool): run reads on the writer connection.
+    if (_serialized || _readerQueues.empty()) {
+        [self _selectOnWriter:sql params:params arrayMode:NO completion:completion];
+        return;
+    }
     int idx = _readerIndex.fetch_add(1) % (int)_readerQueues.size();
     dispatch_queue_t queue = _readerQueues[idx];
     SQLiteConnection *conn = _readerConns[idx];
@@ -627,6 +648,11 @@ struct ReadTxHandle {
 - (void)selectArray:(NSString *)sql
              params:(NSArray *)params
          completion:(void (^)(NSString *, NSArray<NSData *> *, NSError *))completion {
+    // Serialized mode (or an empty pool): run reads on the writer connection.
+    if (_serialized || _readerQueues.empty()) {
+        [self _selectOnWriter:sql params:params arrayMode:YES completion:completion];
+        return;
+    }
     int idx = _readerIndex.fetch_add(1) % (int)_readerQueues.size();
     dispatch_queue_t queue = _readerQueues[idx];
     SQLiteConnection *conn = _readerConns[idx];
@@ -787,6 +813,14 @@ struct ReadTxHandle {
 // MARK: - Read Transactions
 
 - (void)beginReadTransaction:(void (^)(int, NSError *))completion {
+    // Serialized mode: there is no reader pool. A read transaction becomes a
+    // regular deferred transaction on the single connection, gated so it never
+    // overlaps a write transaction.
+    if (_serialized) {
+        [self beginTransaction:@"DEFERRED" completion:completion];
+        return;
+    }
+
     int readerIdx = -1;
     {
         std::lock_guard<std::mutex> lock(_readTxMutex);
@@ -842,6 +876,13 @@ struct ReadTxHandle {
                  params:(NSArray *)params
               arrayMode:(BOOL)arrayMode
              completion:(void (^)(NSString *, NSArray<NSData *> *, NSError *))completion {
+    // Serialized mode: the read transaction is an ordinary transaction on the
+    // single connection, so just run the select on the writer queue.
+    if (_serialized) {
+        [self _selectOnWriter:sql params:params arrayMode:arrayMode completion:completion];
+        return;
+    }
+
     ReadTxHandle handle;
     {
         std::lock_guard<std::mutex> lock(_readTxMutex);
@@ -884,6 +925,13 @@ struct ReadTxHandle {
 
 - (void)endReadTransaction:(int)txId
                 completion:(void (^)(NSError *))completion {
+    // Serialized mode: end the underlying transaction (COMMIT is a no-op for a
+    // read-only transaction) and release the gate for any queued transaction.
+    if (_serialized) {
+        [self commitTransaction:txId completion:completion];
+        return;
+    }
+
     ReadTxHandle handle;
     {
         std::lock_guard<std::mutex> lock(_readTxMutex);
@@ -1121,12 +1169,15 @@ struct ReadTxHandle {
 // MARK: - Sync Operations
 
 - (BOOL)_ensureSyncConn:(NSError **)error {
+    // Serialized mode uses the writer connection for sync operations; no
+    // dedicated sync connection is opened.
+    if (_serialized) return YES;
     if (_syncConnOpened) return YES;
 
     std::string err;
-    int flags = _readOnly
+    int flags = (_readOnly
         ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX)
-        : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX);
+        : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX)) | SQLITE_OPEN_URI;
 
     if (!_syncConn.open(_path, flags, _busyTimeoutMs, _encryptionKey, err)) {
         if (error) *error = [self _errorWithMessage:err code:SQLITE_CANTOPEN extendedCode:SQLITE_CANTOPEN];
@@ -1139,9 +1190,41 @@ struct ReadTxHandle {
     return YES;
 }
 
+// Runs a select synchronously on the writer connection (serialized mode),
+// writing into outResult. The block is executed on _writerQueue via dispatch_sync
+// so the single connection is only ever touched from one queue. Note: must not be
+// called from within _writerQueue itself (it never is — async completions run on
+// the main queue).
+- (void)_selectSyncOnWriter:(NSString *)sql params:(NSArray *)params arrayMode:(BOOL)arrayMode into:(SelectResult *)outResult {
+    const char *sqlUTF8 = strdup([sql UTF8String]);
+    NSArray *paramsCopy = params ? [params copy] : nil;
+    SelectResult *out = outResult;
+    dispatch_sync(_writerQueue, ^{
+        *out = arrayMode
+            ? selectArraySQL(self->_writerConn, sqlUTF8, paramsCopy)
+            : selectSQL(self->_writerConn, sqlUTF8, paramsCopy);
+    });
+    free((void *)sqlUTF8);
+}
+
 - (BOOL)executeSync:(NSString *)sql
              params:(NSArray *)params
               error:(NSError **)error {
+    if (_serialized) {
+        const char *sqlUTF8 = strdup([sql UTF8String]);
+        NSArray *paramsCopy = params ? [params copy] : nil;
+        __block ExecuteResult result{};
+        dispatch_sync(_writerQueue, ^{
+            result = executeSQL(self->_writerConn, sqlUTF8, paramsCopy);
+        });
+        free((void *)sqlUTF8);
+        if (!result.success) {
+            if (error) *error = [self _errorWithMessage:result.error code:result.errorCode extendedCode:result.extendedErrorCode];
+            return NO;
+        }
+        return YES;
+    }
+
     if (![self _ensureSyncConn:error]) return NO;
 
     auto result = executeSQL(_syncConn, [sql UTF8String], params);
@@ -1155,6 +1238,16 @@ struct ReadTxHandle {
 - (NSString *)selectSync:(NSString *)sql
                   params:(NSArray *)params
                    error:(NSError **)error {
+    if (_serialized) {
+        SelectResult result{};
+        [self _selectSyncOnWriter:sql params:params arrayMode:NO into:&result];
+        if (!result.success) {
+            if (error) *error = [self _errorWithMessage:result.error code:result.errorCode extendedCode:result.extendedErrorCode];
+            return nil;
+        }
+        return [[NSString alloc] initWithUTF8String:result.json.c_str()];
+    }
+
     if (![self _ensureSyncConn:error]) return nil;
 
     auto result = selectSQL(_syncConn, [sql UTF8String], params);
@@ -1168,6 +1261,16 @@ struct ReadTxHandle {
 - (NSString *)selectArraySync:(NSString *)sql
                        params:(NSArray *)params
                         error:(NSError **)error {
+    if (_serialized) {
+        SelectResult result{};
+        [self _selectSyncOnWriter:sql params:params arrayMode:YES into:&result];
+        if (!result.success) {
+            if (error) *error = [self _errorWithMessage:result.error code:result.errorCode extendedCode:result.extendedErrorCode];
+            return nil;
+        }
+        return [[NSString alloc] initWithUTF8String:result.json.c_str()];
+    }
+
     if (![self _ensureSyncConn:error]) return nil;
 
     auto result = selectArraySQL(_syncConn, [sql UTF8String], params);

@@ -62,6 +62,26 @@ export interface DatabaseOptions {
 	poolSize?: number;
 	busyTimeout?: number;
 	encryptionKey?: string;
+	/**
+	 * Run every operation on a single serialized connection instead of the
+	 * writer + reader pool. In serialized mode at most one transaction is active
+	 * at a time and reads never run concurrently with writes.
+	 *
+	 * Defaults to `true` for in-memory databases (`:memory:`, an empty path, or a
+	 * `mode=memory` URI) — a pool of separate connections cannot share a private
+	 * in-memory database. Defaults to `false` for on-disk databases, which use
+	 * the reader pool. Set explicitly to override the default (e.g. `false` on an
+	 * in-memory database to opt into a shared-cache pool).
+	 */
+	serialized?: boolean;
+}
+
+/**
+ * Returns true if the path refers to an in-memory (or temporary) database:
+ * bare `:memory:`, an empty path, or a `mode=memory` / `:memory:` URI.
+ */
+export function isInMemoryPath(path: string): boolean {
+	return path === ':memory:' || path === '' || path.indexOf('mode=memory') !== -1 || path.indexOf(':memory:') !== -1;
 }
 
 export class SQLiteError extends Error {
