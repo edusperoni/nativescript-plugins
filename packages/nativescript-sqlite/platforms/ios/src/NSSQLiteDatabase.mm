@@ -7,6 +7,29 @@
 #include <atomic>
 #include <cstring>
 
+// MARK: - Encryption Key
+
+/**
+ * Renders the key as the operand of `PRAGMA key`, doubling any embedded quote
+ * so a key containing one can neither break the statement nor inject into it.
+ *
+ * SQLCipher's raw-key form — x'<64 hex>', or 96 hex to carry the salt — needs
+ * no special case: the codec recognises it from the string *value*, so it must
+ * arrive as ordinary quoted text like any other key. Emitting it unquoted
+ * would instead be a blob literal, which PRAGMA does not accept at all.
+ */
+static std::string encryptionKeyLiteral(const std::string &key) {
+    std::string literal;
+    literal.reserve(key.size() + 2);
+    literal.push_back('\'');
+    for (char c : key) {
+        if (c == '\'') literal.push_back('\'');
+        literal.push_back(c);
+    }
+    literal.push_back('\'');
+    return literal;
+}
+
 // MARK: - JSON String Builder
 
 class JSONBuilder {
@@ -97,7 +120,7 @@ public:
         sqlite3_busy_timeout(db_, busyTimeoutMs);
 
         if (!encryptionKey.empty()) {
-            std::string pragmaSQL = "PRAGMA key = '" + encryptionKey + "'";
+            std::string pragmaSQL = "PRAGMA key = " + encryptionKeyLiteral(encryptionKey);
             char *errMsg = nullptr;
             rc = sqlite3_exec(db_, pragmaSQL.c_str(), nullptr, nullptr, &errMsg);
             if (rc != SQLITE_OK) {

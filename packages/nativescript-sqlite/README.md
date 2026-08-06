@@ -404,6 +404,26 @@ const db = openDatabase({
 
 Every connection in the pool (writer, readers, sync) automatically receives the key via `PRAGMA key` after opening. If the key is wrong or missing for an encrypted database, operations will fail with `SQLITE_NOTADB`.
 
+#### Passphrase vs raw key
+
+The string above is a passphrase: SQLCipher stretches it with PBKDF2 (256,000 iterations by default) **once per connection**, so a pool of 4 pays that cost four times before the first query.
+
+If your key is already full-entropy random bytes, ask for the raw form instead and skip derivation entirely:
+
+```typescript
+const db = openDatabase({
+  path: knownFolders.documents().path + '/encrypted.sqlite',
+  encryptionKey: hexKey, // 64 hex digits = the 32-byte key; 96 supplies the salt too
+  encryptionKeyFormat: 'raw',
+});
+```
+
+The two are equally strong for a random key — PBKDF2 exists to stretch low-entropy secrets, and there is nothing to stretch. For a human-chosen passphrase, that derivation is exactly what makes offline guessing expensive, so keep the default.
+
+They are, however, **different keys**: a database must be opened with the same form it was created with.
+
+`encryptionKeyFormat` is explicit rather than inferred because SQLCipher switches to raw-key material on its own for any key shaped like `x'<64 hex>'`. Leaving that to the shape of a string means one key silently becoming another, so a raw-looking key passed without the option is rejected with an error instead.
+
 ## Type Definitions
 
 ```typescript
@@ -422,6 +442,7 @@ interface DatabaseOptions {
   poolSize?: number;
   busyTimeout?: number;
   encryptionKey?: string;
+  encryptionKeyFormat?: 'passphrase' | 'raw';
 }
 ```
 

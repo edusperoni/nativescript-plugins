@@ -1,4 +1,4 @@
-import { DatabaseOptions, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, isInMemoryPath } from './common';
+import { DatabaseOptions, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, isInMemoryPath, resolveEncryptionKey } from './common';
 import type { PreparedStatement, ReadTransaction, SQLiteDatabase, Transaction } from '.';
 
 export { DatabaseOptions, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue };
@@ -512,7 +512,7 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 
 export function openDatabase(options: DatabaseOptions): SQLiteDatabase {
 	const serialized = options.serialized ?? isInMemoryPath(options.path);
-	const native = NSSQLiteDatabase.openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeySerialized(options.path, options.poolSize ?? 4, options.readOnly ?? false, options.busyTimeout ?? 5000, options.encryptionKey ?? null, serialized);
+	const native = NSSQLiteDatabase.openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeySerialized(options.path, options.poolSize ?? 4, options.readOnly ?? false, options.busyTimeout ?? 5000, resolveEncryptionKey(options), serialized);
 	if (!native) {
 		throw new SQLiteError(`Failed to open database: ${options.path}`, -1);
 	}

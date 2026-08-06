@@ -61,7 +61,25 @@ export interface DatabaseOptions {
 	readOnly?: boolean;
 	poolSize?: number;
 	busyTimeout?: number;
+	/**
+	 * SQLCipher key, applied to every connection in the pool via `PRAGMA key`.
+	 * Treated as a passphrase unless `encryptionKeyFormat` says otherwise.
+	 */
 	encryptionKey?: string;
+	/**
+	 * How `encryptionKey` is interpreted. Defaults to `'passphrase'`.
+	 *
+	 * A passphrase is stretched with PBKDF2 (256,000 iterations by default)
+	 * once per connection. A `'raw'` key is 64 hex digits (or 96 to carry the
+	 * salt) used as key material directly, skipping that derivation — worth it
+	 * for a full-entropy random key, where the two are equally strong and the
+	 * stretching protects nothing. For a human-chosen passphrase the derivation
+	 * is exactly what makes guessing expensive, so leave the default.
+	 *
+	 * The two are different keys: a database must be opened with the same form
+	 * it was created with.
+	 */
+	encryptionKeyFormat?: 'passphrase' | 'raw';
 	/**
 	 * Run every operation on a single serialized connection instead of the
 	 * writer + reader pool. In serialized mode at most one transaction is active
@@ -74,6 +92,40 @@ export interface DatabaseOptions {
 	 * in-memory database to opt into a shared-cache pool).
 	 */
 	serialized?: boolean;
+}
+
+/** The shape SQLCipher reads as key bytes instead of stretching as a passphrase. */
+const RAW_KEY_LITERAL = /^x'(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{96})'$/;
+const RAW_KEY_HEX = /^(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{96})$/;
+
+/**
+ * Resolves `encryptionKey` + `encryptionKeyFormat` into the value handed to
+ * `PRAGMA key`.
+ *
+ * SQLCipher switches to raw-key material on its own whenever a key happens to
+ * look like `x'<64 hex>'`, which would silently make it a different key from
+ * the same characters as a passphrase. Rather than let that ride on the shape
+ * of a string, an unannounced raw-looking key is rejected: the caller has to
+ * say which one they meant.
+ */
+export function resolveEncryptionKey(options: DatabaseOptions): string | null {
+	const key = options.encryptionKey;
+	if (!key) {
+		return null;
+	}
+	if (options.encryptionKeyFormat === 'raw') {
+		if (RAW_KEY_LITERAL.test(key)) {
+			return key;
+		}
+		if (RAW_KEY_HEX.test(key)) {
+			return `x'${key}'`;
+		}
+		throw new Error("nativescript-sqlite: a raw encryptionKey must be 64 or 96 hex digits, optionally wrapped as x'…'");
+	}
+	if (RAW_KEY_LITERAL.test(key)) {
+		throw new Error("nativescript-sqlite: this encryptionKey has SQLCipher's raw-key shape (x'<hex>'), so SQLCipher would use it as key bytes rather than stretch it as a passphrase. Pass encryptionKeyFormat: 'raw' to confirm that, or use a key of a different shape.");
+	}
+	return key;
 }
 
 /**
