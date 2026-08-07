@@ -17,6 +17,9 @@ export class HomeComponent {
 			name: 'nativescript-sms-inbox',
 		},
 		{
+			name: 'nativescript-sqlite',
+		},
+		{
 			name: 'nativescript-supabase',
 		},
 	];

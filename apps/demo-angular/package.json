@@ -6,7 +6,8 @@
 		"@edusperoni/nativescript-mqtt": "file:../../packages/nativescript-mqtt",
 		"nativescript-ripple": "file:../../packages/nativescript-ripple",
 		"@valor/nativescript-websockets": "^1.0.3",
-		"@edusperoni/nativescript-supabase": "file:../../dist/packages/nativescript-supabase"
+		"@edusperoni/nativescript-supabase": "file:../../dist/packages/nativescript-supabase",
+		"@edusperoni/nativescript-sqlite": "file:../../dist/packages/nativescript-sqlite"
 	},
 	"devDependencies": {
 		"@nativescript/android": "~8.9.0",
