@@ -7,6 +7,24 @@
 #include <atomic>
 #include <cstring>
 
+// MARK: - Open Failure
+
+/// A failed step of opening a connection, captured before the handle is closed.
+struct OpenFailure {
+    int code = SQLITE_OK;
+    int extendedCode = SQLITE_OK;
+    std::string message;
+};
+
+/// NativeScript turns this into a JS exception, with the NSException reachable
+/// as `nativeException` — so the SQLite codes ride along in userInfo.
+static void raiseOpenFailure(const OpenFailure &failure) __attribute__((noreturn));
+static void raiseOpenFailure(const OpenFailure &failure) {
+    @throw [NSException exceptionWithName:@"NSSQLiteOpenError"
+                                   reason:[NSString stringWithUTF8String:failure.message.c_str()]
+                                 userInfo:@{@"code": @(failure.code), @"extendedCode": @(failure.extendedCode)}];
+}
+
 // MARK: - Encryption Key
 
 /**
@@ -108,10 +126,14 @@ public:
 
     sqlite3 *handle() const { return db_; }
 
-    bool open(const std::string &path, int flags, int busyTimeoutMs, const std::string &encryptionKey, std::string &outError) {
+    bool open(const std::string &path, int flags, int busyTimeoutMs, const std::string &encryptionKey, OpenFailure &outError) {
         int rc = sqlite3_open_v2(path.c_str(), &db_, flags, nullptr);
         if (rc != SQLITE_OK) {
-            outError = db_ ? sqlite3_errmsg(db_) : "Failed to allocate memory for database";
+            // sqlite3_open_v2 still hands back a handle on most failures, and the
+            // message only lives on that handle — so read it before closing.
+            outError.code = rc;
+            outError.extendedCode = db_ ? sqlite3_extended_errcode(db_) : rc;
+            outError.message = db_ ? sqlite3_errmsg(db_) : "out of memory allocating the database handle";
             if (db_) { sqlite3_close(db_); db_ = nullptr; }
             return false;
         }
@@ -121,13 +143,8 @@ public:
 
         if (!encryptionKey.empty()) {
             std::string pragmaSQL = "PRAGMA key = " + encryptionKeyLiteral(encryptionKey);
-            char *errMsg = nullptr;
-            rc = sqlite3_exec(db_, pragmaSQL.c_str(), nullptr, nullptr, &errMsg);
-            if (rc != SQLITE_OK) {
-                outError = errMsg ? errMsg : "Failed to set encryption key";
-                if (errMsg) sqlite3_free(errMsg);
-                sqlite3_close(db_);
-                db_ = nullptr;
+            if (!execPragma(pragmaSQL.c_str(), outError)) {
+                close();
                 return false;
             }
         }
@@ -135,15 +152,8 @@ public:
         return true;
     }
 
-    bool configureWAL(std::string &outError) {
-        char *errMsg = nullptr;
-        int rc = sqlite3_exec(db_, "PRAGMA journal_mode=WAL", nullptr, nullptr, &errMsg);
-        if (rc != SQLITE_OK) {
-            outError = errMsg ? errMsg : "Failed to set WAL mode";
-            if (errMsg) sqlite3_free(errMsg);
-            return false;
-        }
-        return true;
+    bool configureWAL(OpenFailure &outError) {
+        return execPragma("PRAGMA journal_mode=WAL", outError);
     }
 
     void close() {
@@ -162,6 +172,20 @@ public:
         int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &errMsg);
         if (rc != SQLITE_OK) {
             outError = errMsg ? errMsg : sqlite3_errmsg(db_);
+            if (errMsg) sqlite3_free(errMsg);
+            return false;
+        }
+        return true;
+    }
+
+private:
+    bool execPragma(const char *sql, OpenFailure &outError) {
+        char *errMsg = nullptr;
+        int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &errMsg);
+        if (rc != SQLITE_OK) {
+            outError.code = rc;
+            outError.extendedCode = sqlite3_extended_errcode(db_);
+            outError.message = errMsg ? errMsg : sqlite3_errmsg(db_);
             if (errMsg) sqlite3_free(errMsg);
             return false;
         }
@@ -506,13 +530,11 @@ struct ReadTxHandle {
                encryptionKey:(NSString *)encryptionKey
                   serialized:(BOOL)serialized {
     NSSQLiteDatabase *db = [[NSSQLiteDatabase alloc] init];
-    if (![db _openWithPath:path poolSize:poolSize readOnly:readOnly busyTimeout:busyTimeoutMs encryptionKey:encryptionKey serialized:serialized]) {
-        return nil;
-    }
+    [db _openWithPath:path poolSize:poolSize readOnly:readOnly busyTimeout:busyTimeoutMs encryptionKey:encryptionKey serialized:serialized];
     return db;
 }
 
-- (BOOL)_openWithPath:(NSString *)path
+- (void)_openWithPath:(NSString *)path
              poolSize:(int)poolSize
              readOnly:(BOOL)readOnly
           busyTimeout:(int)busyTimeoutMs
@@ -530,6 +552,7 @@ struct ReadTxHandle {
     _hasActiveWriteTx = false;
 
     std::string error;
+    OpenFailure failure;
 
     // SQLITE_OPEN_URI is always safe to set: SQLite only applies URI parsing to
     // filenames that begin with "file:" (e.g. "file:/db?vfs=memdb"); any other
@@ -538,18 +561,18 @@ struct ReadTxHandle {
         ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX)
         : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX)) | SQLITE_OPEN_URI;
 
-    if (!_writerConn.open(_path, writerFlags, busyTimeoutMs, _encryptionKey, error)) {
-        NSLog(@"[NSSQLiteDatabase] Failed to open writer: %s", error.c_str());
-        return NO;
+    if (!_writerConn.open(_path, writerFlags, busyTimeoutMs, _encryptionKey, failure)) {
+        NSLog(@"[NSSQLiteDatabase] Failed to open writer: %s", failure.message.c_str());
+        raiseOpenFailure(failure);
     }
 
     // Enable WAL for read/write databases. For in-memory databases the pragma is
     // a harmless no-op (journal mode stays "memory").
     if (!readOnly) {
-        if (!_writerConn.configureWAL(error)) {
-            NSLog(@"[NSSQLiteDatabase] Failed to enable WAL: %s", error.c_str());
+        if (!_writerConn.configureWAL(failure)) {
+            NSLog(@"[NSSQLiteDatabase] Failed to enable WAL: %s", failure.message.c_str());
             _writerConn.close();
-            return NO;
+            raiseOpenFailure(failure);
         }
     }
 
@@ -562,7 +585,7 @@ struct ReadTxHandle {
     // operations run on the single writer connection via _writerQueue.
     if (serialized) {
         _isOpen = YES;
-        return YES;
+        return;
     }
 
     // Readers open as READWRITE so they can initialize WAL shared memory (SHM).
@@ -572,8 +595,8 @@ struct ReadTxHandle {
     for (int i = 0; i < poolSize; i++) {
         auto *reader = new SQLiteConnection();
         int readerFlags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI;
-        if (!reader->open(_path, readerFlags, busyTimeoutMs, _encryptionKey, error)) {
-            NSLog(@"[NSSQLiteDatabase] Failed to open reader %d: %s", i, error.c_str());
+        if (!reader->open(_path, readerFlags, busyTimeoutMs, _encryptionKey, failure)) {
+            NSLog(@"[NSSQLiteDatabase] Failed to open reader %d: %s", i, failure.message.c_str());
             delete reader;
             continue;
         }
@@ -588,7 +611,10 @@ struct ReadTxHandle {
     }
 
     _isOpen = YES;
-    return YES;
+}
+
+- (NSError *)_errorFromOpenFailure:(const OpenFailure &)failure {
+    return [self _errorWithMessage:failure.message code:failure.code extendedCode:failure.extendedCode];
 }
 
 - (BOOL)isOpen {
@@ -1197,17 +1223,17 @@ struct ReadTxHandle {
     if (_serialized) return YES;
     if (_syncConnOpened) return YES;
 
-    std::string err;
+    OpenFailure failure;
     int flags = (_readOnly
         ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX)
         : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX)) | SQLITE_OPEN_URI;
 
-    if (!_syncConn.open(_path, flags, _busyTimeoutMs, _encryptionKey, err)) {
-        if (error) *error = [self _errorWithMessage:err code:SQLITE_CANTOPEN extendedCode:SQLITE_CANTOPEN];
+    if (!_syncConn.open(_path, flags, _busyTimeoutMs, _encryptionKey, failure)) {
+        if (error) *error = [self _errorFromOpenFailure:failure];
         return NO;
     }
     if (!_readOnly) {
-        _syncConn.configureWAL(err);
+        _syncConn.configureWAL(failure);
     }
     _syncConnOpened = true;
     return YES;

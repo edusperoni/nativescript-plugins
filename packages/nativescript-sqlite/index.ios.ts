@@ -1,4 +1,4 @@
-import { DatabaseOptions, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, isInMemoryPath, resolveEncryptionKey } from './common';
+import { DatabaseOptions, SQLITE_ERROR, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, isInMemoryPath, resolveEncryptionKey } from './common';
 import type { PreparedStatement, ReadTransaction, SQLiteDatabase, Transaction } from '.';
 
 export { DatabaseOptions, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue };
@@ -6,6 +6,7 @@ export type { PreparedStatement, ReadTransaction, SQLiteDatabase, Transaction };
 export * from './common';
 
 declare class NSSQLiteDatabase extends NSObject {
+	/** Throws an NSSQLiteOpenError NSException carrying the SQLite code in userInfo. */
 	static openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeySerialized(path: string, poolSize: number, readOnly: boolean, busyTimeout: number, encryptionKey: string | null, serialized: boolean): NSSQLiteDatabase;
 
 	executeParamsCompletion(sql: string, params: NSArray<any>, completion: (error: NSError) => void): void;
@@ -42,6 +43,18 @@ declare class NSSQLiteDatabase extends NSObject {
 function toNSError(error: NSError): SQLiteError {
 	const extCode = error.userInfo?.objectForKey?.('extendedCode') as number | undefined;
 	return new SQLiteError(error.localizedDescription, error.code, extCode ?? error.code);
+}
+
+/**
+ * The native open raises an NSException rather than returning an error, so the
+ * SQLite result code arrives on the JS error as `nativeException.userInfo`.
+ */
+function toOpenError(e: any, path: string): SQLiteError {
+	const userInfo = e?.nativeException?.userInfo;
+	const code = (userInfo?.objectForKey?.('code') as number) ?? SQLITE_ERROR;
+	const extCode = (userInfo?.objectForKey?.('extendedCode') as number) ?? code;
+	const message = e?.nativeException?.reason ?? e?.message;
+	return new SQLiteError(message ? `Failed to open database "${path}": ${message}` : `Failed to open database: ${path}`, code, extCode);
 }
 
 function marshalParams(params?: SQLiteParams): NSArray<any> {
@@ -512,9 +525,14 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 
 export function openDatabase(options: DatabaseOptions): SQLiteDatabase {
 	const serialized = options.serialized ?? isInMemoryPath(options.path);
-	const native = NSSQLiteDatabase.openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeySerialized(options.path, options.poolSize ?? 4, options.readOnly ?? false, options.busyTimeout ?? 5000, resolveEncryptionKey(options), serialized);
+	let native: NSSQLiteDatabase;
+	try {
+		native = NSSQLiteDatabase.openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeySerialized(options.path, options.poolSize ?? 4, options.readOnly ?? false, options.busyTimeout ?? 5000, resolveEncryptionKey(options), serialized);
+	} catch (e) {
+		throw toOpenError(e, options.path);
+	}
 	if (!native) {
-		throw new SQLiteError(`Failed to open database: ${options.path}`, -1);
+		throw new SQLiteError(`Failed to open database: ${options.path}`, SQLITE_ERROR);
 	}
 	return new SQLiteDatabaseImpl(native);
 }
