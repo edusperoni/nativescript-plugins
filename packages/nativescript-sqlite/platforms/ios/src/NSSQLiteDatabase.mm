@@ -126,7 +126,7 @@ public:
 
     sqlite3 *handle() const { return db_; }
 
-    bool open(const std::string &path, int flags, int busyTimeoutMs, const std::string &encryptionKey, OpenFailure &outError) {
+    bool open(const std::string &path, int flags, int busyTimeoutMs, const std::string &encryptionKey, const std::vector<std::string> &onOpen, OpenFailure &outError) {
         int rc = sqlite3_open_v2(path.c_str(), &db_, flags, nullptr);
         if (rc != SQLITE_OK) {
             // sqlite3_open_v2 still hands back a handle on most failures, and the
@@ -144,6 +144,18 @@ public:
         if (!encryptionKey.empty()) {
             std::string pragmaSQL = "PRAGMA key = " + encryptionKeyLiteral(encryptionKey);
             if (!execPragma(pragmaSQL.c_str(), outError)) {
+                close();
+                return false;
+            }
+        }
+
+        // Runs after the key, so these statements are the first ones that can
+        // read the database. That ordering is the point: setup which needs a
+        // readable schema — registering an FTS5 tokenizer, for instance — cannot
+        // use sqlite3_auto_extension, because auto-extensions run inside
+        // sqlite3_open_v2, before any key has been applied.
+        for (const std::string &sql : onOpen) {
+            if (!execPragma(sql.c_str(), outError)) {
                 close();
                 return false;
             }
@@ -503,6 +515,7 @@ struct ReadTxHandle {
 
     std::string _path;
     std::string _encryptionKey;
+    std::vector<std::string> _onOpen;
     int _busyTimeoutMs;
     BOOL _readOnly;
     BOOL _isOpen;
@@ -528,9 +541,10 @@ struct ReadTxHandle {
                     readOnly:(BOOL)readOnly
                  busyTimeout:(int)busyTimeoutMs
                encryptionKey:(NSString *)encryptionKey
+                      onOpen:(NSArray<NSString *> *)onOpen
                   serialized:(BOOL)serialized {
     NSSQLiteDatabase *db = [[NSSQLiteDatabase alloc] init];
-    [db _openWithPath:path poolSize:poolSize readOnly:readOnly busyTimeout:busyTimeoutMs encryptionKey:encryptionKey serialized:serialized];
+    [db _openWithPath:path poolSize:poolSize readOnly:readOnly busyTimeout:busyTimeoutMs encryptionKey:encryptionKey onOpen:onOpen serialized:serialized];
     return db;
 }
 
@@ -539,12 +553,19 @@ struct ReadTxHandle {
              readOnly:(BOOL)readOnly
           busyTimeout:(int)busyTimeoutMs
         encryptionKey:(NSString *)encryptionKey
+               onOpen:(NSArray<NSString *> *)onOpen
            serialized:(BOOL)serialized {
     _serialized = serialized;
     _path = [path UTF8String];
     _busyTimeoutMs = busyTimeoutMs;
     _readOnly = readOnly;
     _encryptionKey = encryptionKey ? [encryptionKey UTF8String] : "";
+    _onOpen.clear();
+    for (NSString *sql in onOpen) {
+        if (sql.length) {
+            _onOpen.emplace_back([sql UTF8String]);
+        }
+    }
     _syncConnOpened = false;
     _readerIndex = 0;
     _nextTxId = 1;
@@ -561,7 +582,7 @@ struct ReadTxHandle {
         ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX)
         : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX)) | SQLITE_OPEN_URI;
 
-    if (!_writerConn.open(_path, writerFlags, busyTimeoutMs, _encryptionKey, failure)) {
+    if (!_writerConn.open(_path, writerFlags, busyTimeoutMs, _encryptionKey, _onOpen, failure)) {
         NSLog(@"[NSSQLiteDatabase] Failed to open writer: %s", failure.message.c_str());
         raiseOpenFailure(failure);
     }
@@ -595,7 +616,7 @@ struct ReadTxHandle {
     for (int i = 0; i < poolSize; i++) {
         auto *reader = new SQLiteConnection();
         int readerFlags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI;
-        if (!reader->open(_path, readerFlags, busyTimeoutMs, _encryptionKey, failure)) {
+        if (!reader->open(_path, readerFlags, busyTimeoutMs, _encryptionKey, _onOpen, failure)) {
             NSLog(@"[NSSQLiteDatabase] Failed to open reader %d: %s", i, failure.message.c_str());
             delete reader;
             continue;
@@ -1228,7 +1249,7 @@ struct ReadTxHandle {
         ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX)
         : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX)) | SQLITE_OPEN_URI;
 
-    if (!_syncConn.open(_path, flags, _busyTimeoutMs, _encryptionKey, failure)) {
+    if (!_syncConn.open(_path, flags, _busyTimeoutMs, _encryptionKey, _onOpen, failure)) {
         if (error) *error = [self _errorFromOpenFailure:failure];
         return NO;
     }

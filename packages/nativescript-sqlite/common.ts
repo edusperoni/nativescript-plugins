@@ -81,6 +81,19 @@ export interface DatabaseOptions {
 	 */
 	encryptionKeyFormat?: 'passphrase' | 'raw';
 	/**
+	 * SQL run on every connection in the pool immediately after `PRAGMA key`,
+	 * before the database is used for anything else. A statement that fails
+	 * aborts the open and reports its SQLite error.
+	 *
+	 * This is the only point at which per-connection setup can both see the
+	 * decrypted database and still precede every query. `sqlite3_auto_extension`
+	 * runs too early — inside `sqlite3_open_v2`, before any key has been applied —
+	 * so setup that needs a readable schema, such as registering an FTS5
+	 * tokenizer, must happen here instead. Ordinary connection state like
+	 * `PRAGMA foreign_keys=ON` fits here too.
+	 */
+	onOpen?: string[];
+	/**
 	 * Run every operation on a single serialized connection instead of the
 	 * writer + reader pool. In serialized mode at most one transaction is active
 	 * at a time and reads never run concurrently with writes.

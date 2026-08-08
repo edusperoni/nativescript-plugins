@@ -12,6 +12,7 @@
                     readOnly:(BOOL)readOnly
                  busyTimeout:(int)busyTimeoutMs
                encryptionKey:(NSString *)encryptionKey
+                      onOpen:(NSArray<NSString *> *)onOpen
                   serialized:(BOOL)serialized;
 
 // --- Async operations (dispatch to GCD, callback on main queue) ---

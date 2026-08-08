@@ -7,7 +7,7 @@ export * from './common';
 
 declare class NSSQLiteDatabase extends NSObject {
 	/** Throws an NSSQLiteOpenError NSException carrying the SQLite code in userInfo. */
-	static openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeySerialized(path: string, poolSize: number, readOnly: boolean, busyTimeout: number, encryptionKey: string | null, serialized: boolean): NSSQLiteDatabase;
+	static openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeyOnOpenSerialized(path: string, poolSize: number, readOnly: boolean, busyTimeout: number, encryptionKey: string | null, onOpen: string[], serialized: boolean): NSSQLiteDatabase;
 
 	executeParamsCompletion(sql: string, params: NSArray<any>, completion: (error: NSError) => void): void;
 	selectParamsCompletion(sql: string, params: NSArray<any>, completion: (json: string, blobs: NSArray<NSData>, error: NSError) => void): void;
@@ -527,7 +527,7 @@ export function openDatabase(options: DatabaseOptions): SQLiteDatabase {
 	const serialized = options.serialized ?? isInMemoryPath(options.path);
 	let native: NSSQLiteDatabase;
 	try {
-		native = NSSQLiteDatabase.openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeySerialized(options.path, options.poolSize ?? 4, options.readOnly ?? false, options.busyTimeout ?? 5000, resolveEncryptionKey(options), serialized);
+		native = NSSQLiteDatabase.openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeyOnOpenSerialized(options.path, options.poolSize ?? 4, options.readOnly ?? false, options.busyTimeout ?? 5000, resolveEncryptionKey(options), options.onOpen ?? [], serialized);
 	} catch (e) {
 		throw toOpenError(e, options.path);
 	}
