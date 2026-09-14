@@ -48,8 +48,6 @@ private:
     static int looperCallback(int fd, int events, void* data);
     void drainCompletions();
 
-    ThreadPool pool_;
-
     v8::Isolate*              isolate_{nullptr};
     v8::Persistent<v8::Context> context_;
 
@@ -58,6 +56,8 @@ private:
 
     std::mutex                        completionMtx_;
     std::vector<std::function<void()>> pending_;
+
+    ThreadPool pool_;
 };
 
 } // namespace NSCSQLite

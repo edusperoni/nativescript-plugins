@@ -29,12 +29,73 @@ namespace NSCSQLite
 
             std::unique_ptr<V8RuntimeAdapter> adapter;
             v8::Isolate *isolate;
+            // Weak handle to the JS object so a GC'd, never-closed DB is torn down.
+            v8::Persistent<v8::Object> self;
         };
 
-        static DBInstance *GetInstance(const v8::FunctionCallbackInfo<v8::Value> &args)
+        // Closes every connection on its own dispatcher and frees the instance
+        // once all of them are done.  persistentResolver is null on the GC path.
+        // Each dispatcher is a single FIFO thread whose completions drain in
+        // order, so by the time the last tick runs every completion dispatched
+        // before teardown has already run — the one safe point to free the
+        // instance (~AndroidDispatcher joins its worker before tearing down).
+        static void Teardown(DBInstance *instance, v8::Persistent<v8::Promise::Resolver> *persistentResolver)
         {
-            auto ext = args.This()->GetInternalField(0).As<v8::External>();
-            return static_cast<DBInstance *>(ext->Value());
+            instance->self.Reset();
+
+            // Sync connection is JS-thread-only; close it immediately.
+            if (instance->syncDb)
+                instance->syncDb->close();
+
+            int total = 1 + static_cast<int>(instance->readerDispatchers.size());
+            auto latch = std::make_shared<std::atomic<int>>(total);
+            auto tick = [instance, persistentResolver, latch]()
+            {
+                if (latch->fetch_sub(1, std::memory_order_acq_rel) == 1)
+                {
+                    if (persistentResolver)
+                        instance->adapter->resolveVoid(persistentResolver);
+                    delete instance;
+                }
+            };
+
+            for (size_t i = 0; i < instance->readerDispatchers.size(); ++i)
+            {
+                SQLiteConnection *rdb = instance->readerDbs[i].get();
+                instance->readerDispatchers[i]->dispatch([rdb]()
+                                                         { rdb->close(); }, tick);
+            }
+
+            SQLiteConnection *wdb = instance->writerDb.get();
+            instance->writerDispatcher->dispatch([wdb]()
+                                                 { wdb->close(); }, tick);
+        }
+
+        static void OnGarbageCollected(const v8::WeakCallbackInfo<DBInstance> &info)
+        {
+            Teardown(info.GetParameter(), nullptr);
+        }
+
+        static DBInstance *GetInstance(const v8::FunctionCallbackInfo<v8::Value> &args, bool async)
+        {
+            auto field = args.This()->GetInternalField(0);
+            DBInstance *instance = field->IsExternal() ? static_cast<DBInstance *>(field.As<v8::External>()->Value()) : nullptr;
+            if (instance)
+                return instance;
+
+            auto isolate = args.GetIsolate();
+            auto err = v8::Exception::Error(V8Helpers::ToV8String(isolate, "database is closed"));
+            if (async)
+            {
+                auto resolver = V8Helpers::NewResolver(isolate);
+                resolver->Reject(isolate->GetCurrentContext(), err).IsJust();
+                args.GetReturnValue().Set(resolver->GetPromise());
+            }
+            else
+            {
+                isolate->ThrowException(err);
+            }
+            return nullptr;
         }
 
         static BoundParam ParseSingleParam(v8::Isolate *isolate,
@@ -213,53 +274,36 @@ namespace NSCSQLite
                 return;
             }
 
-            auto ext = v8::External::New(isolate, instance.release());
-            args.This()->SetInternalField(0, ext);
+            DBInstance *raw = instance.release();
+            args.This()->SetInternalField(0, v8::External::New(isolate, raw));
+            raw->self.Reset(isolate, args.This());
+            raw->self.SetWeak(raw, OnGarbageCollected, v8::WeakCallbackType::kParameter);
         }
 
         static void Close(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
+            auto isolate = args.GetIsolate();
+
+            args.This()->SetInternalField(0, v8::External::New(isolate, nullptr));
+
             // Resolve as a promise
-            auto resolver = V8Helpers::NewResolver(args.GetIsolate());
+            auto resolver = V8Helpers::NewResolver(isolate);
             args.GetReturnValue().Set(resolver->GetPromise());
-            auto *persistentResolver = new v8::Persistent<v8::Promise::Resolver>(args.GetIsolate(), resolver);
+            auto *persistentResolver = new v8::Persistent<v8::Promise::Resolver>(isolate, resolver);
 
-            // Sync connection is JS-thread-only; close it immediately.
-            if (instance->syncDb)
-                instance->syncDb->close();
-
-            // Countdown latch — resolve the Promise once every connection has been closed.
-            int total = 1 + static_cast<int>(instance->readerDispatchers.size());
-            auto latch = std::make_shared<std::atomic<int>>(total);
-            auto tick = [instance, persistentResolver, latch]()
-            {
-                if (latch->fetch_sub(1, std::memory_order_acq_rel) == 1)
-                {
-                    instance->adapter->resolveVoid(persistentResolver);
-                }
-            };
-
-            for (size_t i = 0; i < instance->readerDispatchers.size(); ++i)
-            {
-                SQLiteConnection *rdb = instance->readerDbs[i].get();
-                instance->readerDispatchers[i]->dispatch([rdb]()
-                                                         { rdb->close(); }, tick);
-            }
-
-            instance->writerDispatcher->dispatch(
-                [instance]()
-                { if (instance->writerDb) instance->writerDb->close(); },
-                tick);
+            Teardown(instance, persistentResolver);
         }
 
         // Dispatch work to the given dispatcher; resolve or reject the Promise on the
         // JS thread via ALooper.
         // F1: () -> QueryResult      (runs on worker thread — MUST NOT touch V8)
         // F2: (DBInstance*, void*, const QueryResult&) -> void  (runs on JS thread)
+        // Capturing `instance` raw is safe: Close() frees it only from the last
+        // completion, which is queued behind everything dispatched before it.
         template <typename F1, typename F2>
         static void Dispatch(AndroidDispatcher &dispatcher, DBInstance *instance,
                              v8::Isolate *isolate, v8::Local<v8::Promise::Resolver> resolver,
@@ -296,7 +340,7 @@ namespace NSCSQLite
 
         static void AsyncExecute(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -315,7 +359,7 @@ namespace NSCSQLite
 
         static void AsyncSelect(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -336,7 +380,7 @@ namespace NSCSQLite
 
         static void AsyncSelectArray(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -357,7 +401,7 @@ namespace NSCSQLite
 
         static void AsyncGet(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -378,7 +422,7 @@ namespace NSCSQLite
 
         static void AsyncGetArray(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -401,7 +445,7 @@ namespace NSCSQLite
 
         static void SyncExecute(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -421,7 +465,7 @@ namespace NSCSQLite
 
         static void SyncSelect(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -441,7 +485,7 @@ namespace NSCSQLite
 
         static void SyncSelectArray(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -461,7 +505,7 @@ namespace NSCSQLite
 
         static void SyncGet(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -481,7 +525,7 @@ namespace NSCSQLite
 
         static void SyncGetArray(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -503,7 +547,7 @@ namespace NSCSQLite
 
         static void Prepare(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -532,7 +576,7 @@ namespace NSCSQLite
 
         static void StepStatement(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -564,7 +608,7 @@ namespace NSCSQLite
 
         static void FinalizeStatement(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -588,7 +632,7 @@ namespace NSCSQLite
 
         static void BeginTransaction(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -625,7 +669,7 @@ namespace NSCSQLite
 
         static void CommitTransaction(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -647,7 +691,7 @@ namespace NSCSQLite
 
         static void RollbackTransaction(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -669,7 +713,7 @@ namespace NSCSQLite
 
         static void ExecuteInTransaction(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -689,7 +733,7 @@ namespace NSCSQLite
 
         static void SelectInTransaction(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
@@ -716,7 +760,7 @@ namespace NSCSQLite
 
         static void GetRuntimeInfo(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args);
+            auto *instance = GetInstance(args, true);
             if (!instance)
                 return;
 
