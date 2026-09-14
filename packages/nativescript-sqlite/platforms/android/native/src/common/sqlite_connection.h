@@ -116,6 +116,7 @@ private:
     // Helpers
     QueryResult runStatement(sqlite3_stmt* stmt);
     QueryResult runStatementAsJson(sqlite3_stmt* stmt, QueryFormat format, bool firstOnly = false);
+    bool        prepareOne(const std::string& sql, sqlite3_stmt** out, bool* isMulti = nullptr);
     void        bindParams(sqlite3_stmt* stmt, const ParamList& params);
     void        setError(const std::string& msg, int code);
     QueryResult errorResult() const;

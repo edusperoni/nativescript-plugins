@@ -209,6 +209,25 @@ QueryResult SQLiteConnection::runStatement(sqlite3_stmt* stmt) {
 
 // ── Execute ───────────────────────────────────────────────────────────────────
 
+bool SQLiteConnection::prepareOne(const std::string& sql, sqlite3_stmt** out, bool* isMulti) {
+    const char* tail = nullptr;
+    int rc = sqlite3_prepare_v2(db_, sql.c_str(), static_cast<int>(sql.size()), out, &tail);
+    if (rc != SQLITE_OK) { setError(sqlite3_errmsg(db_), rc); return false; }
+
+    sqlite3_stmt* rest = nullptr;
+    rc = sqlite3_prepare_v2(db_, tail, -1, &rest, nullptr);
+    bool multi = rc != SQLITE_OK || rest != nullptr;
+    sqlite3_finalize(rest);
+
+    if (isMulti) { *isMulti = multi; return true; }
+    if (multi) {
+        sqlite3_finalize(*out); *out = nullptr;
+        setError("multiple SQL statements are not supported here", SQLITE_MISUSE);
+        return false;
+    }
+    return true;
+}
+
 QueryResult SQLiteConnection::execute(const std::string& sql, const ParamList& params) {
     if (!db_) { setError("database is closed", SQLITE_MISUSE); return errorResult(); }
 
@@ -224,10 +243,27 @@ QueryResult SQLiteConnection::execute(const std::string& sql, const ParamList& p
     }
 
     if (!stmt) {
-        int rc = sqlite3_prepare_v2(db_, sql.c_str(), static_cast<int>(sql.size()), &stmt, nullptr);
-        if (rc != SQLITE_OK) {
-            setError(sqlite3_errmsg(db_), rc);
-            return errorResult();
+        bool multi = false;
+        if (!prepareOne(sql, &stmt, &multi)) return errorResult();
+        if (multi) {
+            sqlite3_finalize(stmt);
+            if (!params.empty()) {
+                setError("parameters are not supported with multi-statement SQL", SQLITE_MISUSE);
+                return errorResult();
+            }
+            int before = sqlite3_total_changes(db_);
+            char* errmsg = nullptr;
+            int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &errmsg);
+            if (rc != SQLITE_OK) {
+                setError(errmsg ? errmsg : "sqlite3_exec failed", rc);
+                sqlite3_free(errmsg);
+                return errorResult();
+            }
+            QueryResult result;
+            result.success      = true;
+            result.insertId     = sqlite3_last_insert_rowid(db_);
+            result.rowsAffected = sqlite3_total_changes(db_) - before;
+            return result;
         }
         if (cacheEnabled_) {
             execCache_[sql] = stmt;
@@ -260,11 +296,7 @@ uint32_t SQLiteConnection::prepareStatement(const std::string& sql) {
     if (!db_) { setError("database is closed", SQLITE_MISUSE); return 0; }
 
     sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db_, sql.c_str(), static_cast<int>(sql.size()), &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        setError(sqlite3_errmsg(db_), rc);
-        return 0;
-    }
+    if (!prepareOne(sql, &stmt)) return 0;
 
     auto ps  = std::make_unique<PreparedStmt>(stmt, sql);
     uint32_t id = stmtRegistry_.add(std::move(ps));
@@ -529,8 +561,7 @@ QueryResult SQLiteConnection::runStatementAsJson(sqlite3_stmt* stmt,
 QueryResult SQLiteConnection::executeJson(const std::string& sql, const ParamList& params) {
     if (!db_) { setError("database is closed", SQLITE_MISUSE); return errorResult(); }
     sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db_, sql.c_str(), static_cast<int>(sql.size()), &stmt, nullptr);
-    if (rc != SQLITE_OK) { setError(sqlite3_errmsg(db_), rc); return errorResult(); }
+    if (!prepareOne(sql, &stmt)) return errorResult();
     bindParams(stmt, params);
     QueryResult r = runStatementAsJson(stmt, QueryFormat::ObjectRows, false);
     sqlite3_finalize(stmt);
@@ -541,8 +572,7 @@ QueryResult SQLiteConnection::executeJson(const std::string& sql, const ParamLis
 QueryResult SQLiteConnection::executeGetJson(const std::string& sql, const ParamList& params) {
     if (!db_) { setError("database is closed", SQLITE_MISUSE); return errorResult(); }
     sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db_, sql.c_str(), static_cast<int>(sql.size()), &stmt, nullptr);
-    if (rc != SQLITE_OK) { setError(sqlite3_errmsg(db_), rc); return errorResult(); }
+    if (!prepareOne(sql, &stmt)) return errorResult();
     bindParams(stmt, params);
     QueryResult r = runStatementAsJson(stmt, QueryFormat::ObjectRows, true);
     sqlite3_finalize(stmt);
@@ -553,8 +583,7 @@ QueryResult SQLiteConnection::executeGetJson(const std::string& sql, const Param
 QueryResult SQLiteConnection::executeArrayJson(const std::string& sql, const ParamList& params) {
     if (!db_) { setError("database is closed", SQLITE_MISUSE); return errorResult(); }
     sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db_, sql.c_str(), static_cast<int>(sql.size()), &stmt, nullptr);
-    if (rc != SQLITE_OK) { setError(sqlite3_errmsg(db_), rc); return errorResult(); }
+    if (!prepareOne(sql, &stmt)) return errorResult();
     bindParams(stmt, params);
     QueryResult r = runStatementAsJson(stmt, QueryFormat::ArrayRows, false);
     sqlite3_finalize(stmt);
@@ -565,8 +594,7 @@ QueryResult SQLiteConnection::executeArrayJson(const std::string& sql, const Par
 QueryResult SQLiteConnection::executeGetArrayJson(const std::string& sql, const ParamList& params) {
     if (!db_) { setError("database is closed", SQLITE_MISUSE); return errorResult(); }
     sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db_, sql.c_str(), static_cast<int>(sql.size()), &stmt, nullptr);
-    if (rc != SQLITE_OK) { setError(sqlite3_errmsg(db_), rc); return errorResult(); }
+    if (!prepareOne(sql, &stmt)) return errorResult();
     bindParams(stmt, params);
     QueryResult r = runStatementAsJson(stmt, QueryFormat::ArrayRows, true);
     sqlite3_finalize(stmt);
