@@ -1,3 +1,13 @@
+// Gradle refuses -P properties with a dot through the environment, so the
+// backend also accepts NSCSQLITE_BACKEND for CI and scripted builds.
+def backend = project.hasProperty('nscsqlite.backend')
+              ? project.property('nscsqlite.backend').toString()
+              : (System.getenv('NSCSQLITE_BACKEND') ?: 'v8')
+
+if (backend != 'v8' && backend != 'napi') {
+    throw new GradleException("nscsqlite.backend must be 'v8' or 'napi', got '${backend}'")
+}
+
 def sqliteImpl = project.hasProperty('nscsqlite.sqliteImpl')
                  ? project.property('nscsqlite.sqliteImpl')
                  : 'bundled'
@@ -127,7 +137,7 @@ def resolveV8IncludeDir(project, File nativeDir) {
     return includeDir
 }
 
-def v8IncludeDir = resolveV8IncludeDir(project, pluginNativeDir)
+def v8IncludeDir = backend == 'v8' ? resolveV8IncludeDir(project, pluginNativeDir) : null
 
 def findNsAndroidDir(project) {
     def dir = project.rootProject.projectDir
@@ -179,13 +189,17 @@ if (nsAndroidDir) {
 }
 
 def cmakeArgs = [
-    "-DV8_INCLUDE_DIR=${v8IncludeDir.absolutePath}",
+    "-DNSCSQLITE_BACKEND=${backend}",
     "-DMYLIB_SQLITE_IMPL=${sqliteImpl}",
     "-DMYLIB_SQLITE_INCLUDE_DIR=${sqliteIncludeDir}",
     "-DMYLIB_SQLITE_LIB_DIR=${sqliteLibDir}",
     "-DMYLIB_SQLITE_LIB_NAME=${sqliteLibName}",
     "-DMYLIB_SQLITE_FLAGS=${sqliteFlags}"
 ]
+
+if (v8IncludeDir) {
+    cmakeArgs << "-DV8_INCLUDE_DIR=${v8IncludeDir.absolutePath}"
+}
 
 if (nsStubsDir) {
     cmakeArgs << "-DNS_LIBS_DIR=${nsStubsDir}"
@@ -210,7 +224,9 @@ android {
         }
     }
 
-    if (sqliteImpl == 'sqlcipher') {
+    // The napi backend takes its Node-API headers from the runtime AAR's
+    // header-only Prefab package.
+    if (sqliteImpl == 'sqlcipher' || backend == 'napi') {
         buildFeatures {
             prefab true
         }
