@@ -89,7 +89,15 @@ function buildTests(demo: DemoSharedNativescriptSqlite): TestEntry[] {
 		{ name: 'testSerialized', run: () => demo.testSerialized() },
 		{ name: 'testKeyFormatValidation', run: () => demo.testKeyFormatValidation() },
 		{ name: 'testSyncOnClosedDatabase', run: () => demo.testSyncOnClosedDatabase() },
+		{ name: 'testSingleWriterSync', run: () => demo.testSingleWriterSync() },
+		{ name: 'testSyncAsyncOrdering', run: () => demo.testSyncAsyncOrdering() },
+		{ name: 'testSyncReentrancy', run: () => demo.testSyncReentrancy() },
+		{ name: 'testTransactionSyncMethods', run: () => demo.testTransactionSyncMethods() },
+		{ name: 'testTransactionSync', run: () => demo.testTransactionSync() },
+		{ name: 'testJoinTransaction', run: () => demo.testJoinTransaction() },
+		{ name: 'testAsyncOpen', run: () => demo.testAsyncOpen() },
 		{ name: 'testSQLCipher', requiresSQLCipher: true, run: () => demo.testSQLCipher() },
+		{ name: 'testKeyedOpenLatency', requiresSQLCipher: true, run: () => demo.testKeyedOpenLatency() },
 	];
 }
 

@@ -1,6 +1,6 @@
 ﻿import { knownFolders, File } from '@nativescript/core';
 import { DemoSharedBase } from '../utils';
-import { openDatabase, SQLiteDatabase, SQLiteError, SQLITE_CONSTRAINT, SQLITE_ERROR } from '@edusperoni/nativescript-sqlite';
+import { DatabaseOptions, openDatabase, SQLiteDatabase, SQLiteError, SQLITE_BUSY, SQLITE_CONSTRAINT, SQLITE_ERROR, SQLITE_MISUSE, SQLITE_NOTADB } from '@edusperoni/nativescript-sqlite';
 import { runBenchmarks } from './benchmark';
 
 export { runBenchmarks } from './benchmark';
@@ -404,9 +404,11 @@ n      INTEGER
 			assertEqual(arr.columns[0], 'id', 'selectArraySync col name');
 			this.log(TAG, `  → columns: [${arr.columns}], ${arr.rows.length} rows ✓`);
 
-			this.log(TAG, 'getArraySync: id=1...');
-			const singleArr = db.getArraySync(`SELECT id, v FROM sync_t WHERE id = ?`, [1]);
-			assertEqual(singleArr.rows.length, 1, 'getArraySync row');
+			// The query matches both rows, so this also pins getArraySync to one row
+			// rather than letting it pass as an alias for selectArraySync.
+			this.log(TAG, 'getArraySync on a query matching two rows...');
+			const singleArr = db.getArraySync(`SELECT id, v FROM sync_t ORDER BY id`);
+			assertEqual(singleArr.rows.length, 1, 'getArraySync should return the first row only');
 			assertEqual(singleArr.rows[0][1] as string, 'x', 'getArraySync value');
 			this.log(TAG, `  → [${singleArr.rows[0]}] ✓`);
 
@@ -606,7 +608,15 @@ n      INTEGER
 			await this.testSerialized();
 			await this.testKeyFormatValidation();
 			await this.testSyncOnClosedDatabase();
+			await this.testSingleWriterSync();
+			await this.testSyncAsyncOrdering();
+			await this.testSyncReentrancy();
+			await this.testTransactionSyncMethods();
+			await this.testTransactionSync();
+			await this.testJoinTransaction();
+			await this.testAsyncOpen();
 			await this.testSQLCipher();
+			await this.testKeyedOpenLatency();
 			console.log('[ALL] All tests PASSED');
 		} finally {
 			this.verbose = prev;
@@ -754,7 +764,350 @@ n      INTEGER
 		console.log(TAG, 'PASSED');
 	}
 
-	// ── 16. Encryption (needs a SQLite built with a codec) ────────────────────
+	// ── 16. One writer shared by the sync and async APIs ──────────────────────
+	async testSingleWriterSync() {
+		const TAG = '[SingleWriter]';
+		const db = openDatabase({ path: tempDb('test_singlewriter.db') });
+		try {
+			await db.execute(`CREATE TABLE w (id INTEGER PRIMARY KEY, v TEXT)`);
+
+			await db.transaction(async (tx) => {
+				await tx.execute(`INSERT INTO w VALUES (1, 'in-tx')`);
+
+				this.log(TAG, 'A sync read must see the open transaction...');
+				const seen = db.getSync<{ v: string }>(`SELECT v FROM w WHERE id = 1`);
+				assertEqual(seen!.v, 'in-tx', 'sync read sees the uncommitted row');
+
+				this.log(TAG, 'executeSync must be refused, and refused immediately...');
+				const t0 = Date.now();
+				let threw = false;
+				try {
+					db.executeSync(`INSERT INTO w VALUES (2, 'sync')`);
+				} catch (e) {
+					threw = true;
+					assert(e instanceof SQLiteError, 'should throw SQLiteError');
+					assertEqual((e as SQLiteError).code, SQLITE_BUSY, 'executeSync during a transaction should report SQLITE_BUSY');
+				}
+				const elapsed = Date.now() - t0;
+				assert(threw, 'executeSync during a transaction should throw');
+				assert(elapsed < 50, `executeSync should fail without waiting on the busy timeout, took ${elapsed}ms`);
+				this.log(TAG, `  → refused in ${elapsed}ms ✓`);
+			});
+
+			this.log(TAG, 'After the commit executeSync works again...');
+			db.executeSync(`INSERT INTO w VALUES (2, 'after')`);
+			const count = db.getSync<{ n: number }>(`SELECT count(*) AS n FROM w`);
+			assertEqual(count!.n, 2, 'both rows present after the transaction');
+
+			console.log(TAG, 'PASSED');
+		} finally {
+			await db.close();
+		}
+	}
+
+	// ── 17. Sync calls are ordered behind queued async work ───────────────────
+	async testSyncAsyncOrdering() {
+		const TAG = '[SyncOrdering]';
+		const db = openDatabase({ path: tempDb('test_ordering.db') });
+		try {
+			await db.execute(`CREATE TABLE o (id INTEGER PRIMARY KEY AUTOINCREMENT, v INTEGER)`);
+
+			this.log(TAG, 'A sync read after 50 un-awaited writes must see all of them...');
+			const pending: Promise<void>[] = [];
+			for (let i = 0; i < 50; i++) pending.push(db.execute(`INSERT INTO o (v) VALUES (?)`, [i]));
+			const mid = db.getSync<{ n: number }>(`SELECT count(*) AS n FROM o`);
+			assertEqual(mid!.n, 50, 'sync read should queue behind the async writes');
+			await Promise.all(pending);
+			this.log(TAG, '  → saw all 50 ✓');
+
+			this.log(TAG, 'Interleaved sync and async writes must not lose rows...');
+			await db.execute(`DELETE FROM o`);
+			const more: Promise<void>[] = [];
+			for (let i = 0; i < 40; i++) {
+				if (i % 2 === 0) db.executeSync(`INSERT INTO o (v) VALUES (?)`, [i]);
+				else more.push(db.execute(`INSERT INTO o (v) VALUES (?)`, [i]));
+			}
+			await Promise.all(more);
+			const total = db.getSync<{ n: number }>(`SELECT count(*) AS n FROM o`);
+			assertEqual(total!.n, 40, 'interleaved writes all landed');
+			this.log(TAG, '  → 40/40 ✓');
+
+			console.log(TAG, 'PASSED');
+		} finally {
+			await db.close();
+		}
+	}
+
+	// ── 18. Sync calls from inside continuations and callbacks ────────────────
+	async testSyncReentrancy() {
+		const TAG = '[SyncReentrancy]';
+		const db = openDatabase({ path: tempDb('test_reentrancy.db') });
+		try {
+			await db.execute(`CREATE TABLE r (id INTEGER PRIMARY KEY, v TEXT)`);
+
+			this.log(TAG, 'From inside an awaited continuation...');
+			await db.execute(`INSERT INTO r VALUES (1, 'async')`);
+			db.executeSync(`INSERT INTO r VALUES (2, 'sync-in-continuation')`);
+			const row = db.getSync<{ v: string }>(`SELECT v FROM r WHERE id = 2`);
+			assertEqual(row!.v, 'sync-in-continuation', 'sync write from a continuation');
+
+			this.log(TAG, "From inside transaction()'s callback (reads only)...");
+			await db.transaction(async (tx) => {
+				await tx.execute(`INSERT INTO r VALUES (3, 'in-tx')`);
+				const inTx = db.getSync<{ n: number }>(`SELECT count(*) AS n FROM r`);
+				assertEqual(inTx!.n, 3, 'sync read inside a transaction callback');
+			});
+
+			console.log(TAG, 'PASSED');
+		} finally {
+			await db.close();
+		}
+	}
+
+	// ── 19. Sync methods on transaction objects ───────────────────────────────
+	async testTransactionSyncMethods() {
+		const TAG = '[TxSyncMethods]';
+		const db = openDatabase({ path: tempDb('test_txsync.db') });
+		try {
+			await db.execute(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`);
+
+			this.log(TAG, "A transaction's own sync methods see and change its state...");
+			await db.transaction(async (tx) => {
+				tx.executeSync(`INSERT INTO t VALUES (1, 'a')`);
+				const seen = tx.getSync<{ v: string }>(`SELECT v FROM t WHERE id = 1`);
+				assertEqual(seen!.v, 'a', 'tx.getSync sees tx.executeSync');
+			});
+			assertEqual((await db.get<{ v: string }>(`SELECT v FROM t WHERE id = 1`))!.v, 'a', 'committed');
+
+			this.log(TAG, 'Their writes roll back with the transaction...');
+			try {
+				await db.transaction(async (tx) => {
+					tx.executeSync(`INSERT INTO t VALUES (2, 'b')`);
+					throw new Error('rollback please');
+				});
+			} catch (e) {
+				/* expected */
+			}
+			assertEqual(await db.get(`SELECT v FROM t WHERE id = 2`), undefined, 'rolled back with the transaction');
+
+			this.log(TAG, 'Using a transaction object after it finished must throw...');
+			let escaped: any;
+			await db.transaction(async (tx) => {
+				escaped = tx;
+			});
+			let threw = false;
+			try {
+				escaped.executeSync(`INSERT INTO t VALUES (3, 'c')`);
+			} catch (e) {
+				threw = true;
+				assert(e instanceof SQLiteError, 'finished transaction should throw SQLiteError');
+				assertEqual((e as SQLiteError).code, SQLITE_MISUSE, 'finished transaction reports SQLITE_MISUSE');
+			}
+			assert(threw, 'a finished transaction object should refuse work');
+
+			this.log(TAG, 'Low-level executeInTransactionSync / selectInTransactionSync...');
+			const txId = await db.beginTransaction();
+			db.executeInTransactionSync(txId, `INSERT INTO t VALUES (4, 'd')`);
+			const rows = db.selectInTransactionSync(txId, `SELECT v FROM t WHERE id = 4`);
+			assertEqual((rows[0] as { v: string }).v, 'd', 'selectInTransactionSync');
+			const arr = db.selectArrayInTransactionSync(txId, `SELECT id, v FROM t WHERE id = 4`);
+			assertEqual(arr.columns.length, 2, 'selectArrayInTransactionSync columns');
+			await db.commitTransaction(txId);
+
+			this.log(TAG, 'An unknown txId must throw...');
+			threw = false;
+			try {
+				db.executeInTransactionSync(999999, `SELECT 1`);
+			} catch (e) {
+				threw = true;
+				assertEqual((e as SQLiteError).code, SQLITE_MISUSE, 'unknown txId reports SQLITE_MISUSE');
+			}
+			assert(threw, 'an unknown txId should throw');
+
+			console.log(TAG, 'PASSED');
+		} finally {
+			await db.close();
+		}
+	}
+
+	// ── 20. transactionSync ───────────────────────────────────────────────────
+	async testTransactionSync() {
+		const TAG = '[TransactionSync]';
+		const db = openDatabase({ path: tempDb('test_txsync_full.db') });
+		try {
+			await db.execute(`CREATE TABLE s (id INTEGER PRIMARY KEY, v TEXT)`);
+
+			this.log(TAG, 'Commit path, and the callback return value...');
+			const returned = db.transactionSync((tx) => {
+				tx.executeSync(`INSERT INTO s VALUES (1, 'one')`);
+				return tx.getSync<{ v: string }>(`SELECT v FROM s WHERE id = 1`)!.v;
+			});
+			assertEqual(returned, 'one', 'transactionSync returns the callback value');
+			assertEqual((await db.get<{ v: string }>(`SELECT v FROM s WHERE id = 1`))!.v, 'one', 'committed');
+
+			this.log(TAG, 'A throw rolls back and rethrows the original error...');
+			const sentinel = new Error('boom');
+			let caught: unknown;
+			try {
+				db.transactionSync((tx) => {
+					tx.executeSync(`INSERT INTO s VALUES (2, 'two')`);
+					throw sentinel;
+				});
+			} catch (e) {
+				caught = e;
+			}
+			assert(caught === sentinel, 'the original error is rethrown unchanged');
+			assertEqual(await db.get(`SELECT v FROM s WHERE id = 2`), undefined, 'rolled back');
+
+			this.log(TAG, 'An async callback must be rejected...');
+			let threw = false;
+			try {
+				db.transactionSync((() => Promise.resolve(1)) as any);
+			} catch (e) {
+				threw = true;
+				this.log(TAG, `  → ${(e as Error).message} ✓`);
+			}
+			assert(threw, 'a thenable-returning callback should throw');
+
+			this.log(TAG, 'savepointSync rolls back its own work only...');
+			db.transactionSync((tx) => {
+				tx.executeSync(`INSERT INTO s VALUES (3, 'three')`);
+				try {
+					tx.savepointSync((sp) => {
+						sp.executeSync(`INSERT INTO s VALUES (4, 'four')`);
+						throw new Error('nested');
+					});
+				} catch (e) {
+					/* expected */
+				}
+			});
+			assert((await db.get(`SELECT v FROM s WHERE id = 3`)) != null, 'outer row survives');
+			assertEqual(await db.get(`SELECT v FROM s WHERE id = 4`), undefined, 'savepoint row rolled back');
+
+			this.log(TAG, 'Work dispatched inside the callback runs after it, not inside it...');
+			let dispatched: Promise<void>;
+			try {
+				db.transactionSync((tx) => {
+					tx.executeSync(`INSERT INTO s VALUES (5, 'five')`);
+					dispatched = db.execute(`INSERT INTO s VALUES (6, 'six')`);
+					throw new Error('rollback');
+				});
+			} catch (e) {
+				/* expected */
+			}
+			await dispatched!;
+			assertEqual(await db.get(`SELECT v FROM s WHERE id = 5`), undefined, "the sync transaction's own row is gone");
+			assert((await db.get(`SELECT v FROM s WHERE id = 6`)) != null, 'the dispatched write ran outside the rolled-back transaction');
+			this.log(TAG, '  → 5 rolled back, 6 kept ✓');
+
+			this.log(TAG, 'Writes queued before it are visible inside it...');
+			const queued = db.execute(`INSERT INTO s VALUES (7, 'seven')`);
+			const sawSeven = db.transactionSync((tx) => tx.getSync(`SELECT v FROM s WHERE id = 7`) != null);
+			await queued;
+			assert(sawSeven, 'transactionSync waits behind writes queued before it');
+
+			this.log(TAG, 'transactionSync during an open async transaction is refused, fast...');
+			await db.transaction(async (tx) => {
+				const t0 = Date.now();
+				let refused = false;
+				try {
+					db.transactionSync(() => undefined);
+				} catch (e) {
+					refused = true;
+					assertEqual((e as SQLiteError).code, SQLITE_BUSY, 'nested transactionSync reports SQLITE_BUSY');
+				}
+				const elapsed = Date.now() - t0;
+				assert(refused, 'transactionSync inside a transaction should throw');
+				assert(elapsed < 50, `should fail immediately, took ${elapsed}ms`);
+			});
+
+			this.log(TAG, 'The database is still usable after all of that...');
+			db.executeSync(`INSERT INTO s VALUES (8, 'eight')`);
+			await db.execute(`INSERT INTO s VALUES (9, 'nine')`);
+			assert((await db.get(`SELECT v FROM s WHERE id = 8`)) != null, 'sync write after a failed sync transaction');
+			assert((await db.get(`SELECT v FROM s WHERE id = 9`)) != null, 'async write after a failed sync transaction');
+
+			console.log(TAG, 'PASSED');
+		} finally {
+			await db.close();
+		}
+	}
+
+	// ── 21. executeSync({ joinTransaction }) ──────────────────────────────────
+	async testJoinTransaction() {
+		const TAG = '[JoinTransaction]';
+		const db = openDatabase({ path: tempDb('test_join.db') });
+		try {
+			await db.execute(`CREATE TABLE j (id INTEGER PRIMARY KEY, v TEXT)`);
+
+			this.log(TAG, 'Joining a transaction that commits...');
+			await db.transaction(async () => {
+				db.executeSync(`INSERT INTO j VALUES (1, 'joined')`, undefined, { joinTransaction: true });
+			});
+			assert((await db.get(`SELECT v FROM j WHERE id = 1`)) != null, 'joined write committed with the transaction');
+
+			this.log(TAG, 'Joining a transaction that rolls back...');
+			try {
+				await db.transaction(async () => {
+					db.executeSync(`INSERT INTO j VALUES (2, 'joined')`, undefined, { joinTransaction: true });
+					throw new Error('rollback');
+				});
+			} catch (e) {
+				/* expected */
+			}
+			assertEqual(await db.get(`SELECT v FROM j WHERE id = 2`), undefined, 'joined write rolled back with the transaction');
+
+			this.log(TAG, 'With no transaction open it behaves like any other executeSync...');
+			db.executeSync(`INSERT INTO j VALUES (3, 'plain')`, undefined, { joinTransaction: true });
+			assert((await db.get(`SELECT v FROM j WHERE id = 3`)) != null, 'joinTransaction with no transaction open');
+
+			console.log(TAG, 'PASSED');
+		} finally {
+			await db.close();
+		}
+	}
+
+	// ── 22. Background opens, asyncOpen and initialized() ─────────────────────
+	async testAsyncOpen() {
+		const TAG = '[AsyncOpen]';
+
+		this.log(TAG, 'asyncOpen returns immediately and initialized() resolves...');
+		const t0 = Date.now();
+		const db = openDatabase({ path: tempDb('test_asyncopen.db'), asyncOpen: true });
+		const openMs = Date.now() - t0;
+		try {
+			assert(db.isOpen, 'isOpen should be true while still opening');
+			assert(openMs < 50, `asyncOpen should return immediately, took ${openMs}ms`);
+			await db.initialized();
+			await db.execute(`CREATE TABLE a (x INTEGER)`);
+			await db.execute(`INSERT INTO a VALUES (1)`);
+			assertEqual((await db.get<{ x: number }>(`SELECT x FROM a`))!.x, 1, 'usable after initialized()');
+			this.log(TAG, `  → openDatabase ${openMs}ms ✓`);
+		} finally {
+			await db.close();
+		}
+
+		this.log(TAG, 'A sync call before initialization blocks and then works...');
+		const db2 = openDatabase({ path: tempDb('test_asyncopen2.db'), asyncOpen: true });
+		try {
+			db2.executeSync(`CREATE TABLE b (x INTEGER)`);
+			db2.executeSync(`INSERT INTO b VALUES (7)`);
+			assertEqual(db2.getSync<{ x: number }>(`SELECT x FROM b`)!.x, 7, 'sync path waited for the open');
+		} finally {
+			await db2.close();
+		}
+
+		this.log(TAG, 'Opening and closing immediately, 50 times...');
+		for (let i = 0; i < 50; i++) {
+			const d = openDatabase({ path: tempDb('test_asyncopen_loop.db'), asyncOpen: true });
+			await d.close();
+		}
+		this.log(TAG, '  → no crash ✓');
+
+		console.log(TAG, 'PASSED');
+	}
+
+	// ── 23. Encryption (needs a SQLite built with a codec) ────────────────────
 	async testSQLCipher() {
 		const TAG = '[SQLCipher]';
 		const path = tempDb('test_cipher.db');
@@ -818,6 +1171,83 @@ n      INTEGER
 		}
 		await assertUnreadable(rawPath, rawKey, 'a raw key and the same characters as a passphrase are different keys');
 		this.log(TAG, '  → passphrase form does not open the raw-keyed file ✓');
+
+		console.log(TAG, 'PASSED');
+	}
+
+	// ── 24. What a keyed open costs the JS thread (needs a codec) ─────────────
+	async testKeyedOpenLatency() {
+		const TAG = '[KeyedOpen]';
+		const key = 'latency-probe-key';
+
+		const measure = async (label: string, options: DatabaseOptions): Promise<number> => {
+			const t0 = Date.now();
+			const db = openDatabase(options);
+			const ms = Date.now() - t0;
+			try {
+				await db.initialized();
+				await db.execute(`CREATE TABLE IF NOT EXISTS k (x INTEGER)`);
+			} finally {
+				await db.close();
+			}
+			this.log(TAG, `  → ${label}: ${ms}ms on the JS thread`);
+			return ms;
+		};
+
+		const pool4 = await measure('keyed, poolSize 4', { path: tempDb('test_lat4.db'), encryptionKey: key, poolSize: 4 });
+		const pool1 = await measure('keyed, poolSize 1', { path: tempDb('test_lat1.db'), encryptionKey: key, poolSize: 1 });
+		const async4 = await measure('keyed, poolSize 4, asyncOpen', { path: tempDb('test_lata4.db'), encryptionKey: key, poolSize: 4, asyncOpen: true });
+		console.log(TAG, `openDatabase on the JS thread: pool4=${pool4}ms pool1=${pool1}ms asyncOpen=${async4}ms`);
+
+		// Only the writer is keyed on the JS thread now, so a larger pool must not
+		// cost the JS thread more.
+		assert(pool4 < pool1 * 2 + 100, `poolSize 4 (${pool4}ms) should not scale with the pool the way it used to (poolSize 1 was ${pool1}ms)`);
+		assert(async4 < 50, `asyncOpen should keep every derivation off the JS thread, took ${async4}ms`);
+
+		this.log(TAG, 'A wrong key still throws from openDatabase in the default mode...');
+		const path = tempDb('test_wrongkey.db');
+		const seed = openDatabase({ path, encryptionKey: key, poolSize: 1 });
+		await seed.execute(`CREATE TABLE k (x INTEGER)`);
+		await seed.close();
+
+		let threw = false;
+		try {
+			openDatabase({ path, encryptionKey: 'not-the-key', poolSize: 1 });
+		} catch (e) {
+			threw = true;
+			assertEqual((e as SQLiteError).code, SQLITE_NOTADB, 'wrong key reports SQLITE_NOTADB at open');
+		}
+		assert(threw, 'a wrong key should throw from openDatabase');
+
+		this.log(TAG, 'With asyncOpen it surfaces through initialized() instead...');
+		const bad = openDatabase({ path, encryptionKey: 'not-the-key', poolSize: 1, asyncOpen: true });
+		let rejected = false;
+		try {
+			await bad.initialized();
+		} catch (e) {
+			rejected = true;
+			assertEqual((e as SQLiteError).code, SQLITE_NOTADB, 'initialized() rejects with SQLITE_NOTADB');
+		}
+		assert(rejected, 'initialized() should reject after a failed async open');
+
+		let syncThrew = false;
+		try {
+			bad.getSync(`SELECT 1`);
+		} catch (e) {
+			syncThrew = true;
+			assertEqual((e as SQLiteError).code, SQLITE_NOTADB, 'sync methods report the open error');
+		}
+		assert(syncThrew, 'a sync method should throw the open error');
+
+		let asyncRejected = false;
+		try {
+			await bad.execute(`SELECT 1`);
+		} catch (e) {
+			asyncRejected = true;
+			assertEqual((e as SQLiteError).code, SQLITE_NOTADB, 'async methods reject with the open error');
+		}
+		assert(asyncRejected, 'an async method should reject with the open error');
+		await bad.close();
 
 		console.log(TAG, 'PASSED');
 	}
