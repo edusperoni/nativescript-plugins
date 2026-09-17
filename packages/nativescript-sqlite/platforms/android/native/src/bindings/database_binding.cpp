@@ -17,9 +17,13 @@ namespace NSCSQLite
         // that use a different tag than the one the External was created with.
         constexpr v8::ExternalPointerTypeTag kDBInstanceTag = 1;
 
-        // Each connection is SQLITE_OPEN_NOMUTEX because it is accessed by exactly one
-        // thread at a time.  WAL mode (set on the writer) lets readers proceed without
-        // blocking writes and writes proceed without blocking readers.
+        // Pooled mode: every connection is SQLITE_OPEN_NOMUTEX because it is accessed
+        // by exactly one thread at a time.  WAL mode (set on the writer) lets readers
+        // proceed without blocking writes and writes proceed without blocking readers.
+        //
+        // Serialized mode: readerDbs/readerDispatchers/syncDb stay empty and writerDb
+        // — opened SQLITE_OPEN_FULLMUTEX — serves the dispatcher thread and the JS
+        // thread alike, SQLite's own locking making that concurrency safe.
         struct DBInstance
         {
             std::unique_ptr<SQLiteConnection> writerDb;
@@ -35,14 +39,33 @@ namespace NSCSQLite
             v8::Isolate *isolate;
             // Weak handle to the JS object so a GC'd, never-closed DB is torn down.
             v8::Persistent<v8::Object> self;
+
+            SQLiteConnection *syncConnection() const
+            {
+                return syncDb ? syncDb.get() : writerDb.get();
+            }
         };
+
+        static void ThrowSQLiteError(v8::Isolate *isolate, const std::string &message, int code)
+        {
+            auto ctx = isolate->GetCurrentContext();
+            auto errObj = v8::Exception::Error(V8Helpers::ToV8String(isolate, message)).As<v8::Object>();
+            V8Helpers::SetProp(isolate, ctx, errObj, "code", v8::Integer::New(isolate, code));
+            isolate->ThrowException(errObj);
+        }
 
         // Closes every connection on its own dispatcher and frees the instance
         // once all of them are done.  persistentResolver is null on the GC path.
         // Each dispatcher is a single FIFO thread whose completions drain in
-        // order, so by the time the last tick runs every completion dispatched
-        // before teardown has already run — the one safe point to free the
-        // instance (~AndroidDispatcher joins its worker before tearing down).
+        // order, so by the time the writer's completion runs every completion
+        // dispatched before teardown has already run — the one safe point to free
+        // the instance (~AndroidDispatcher joins its worker before tearing down).
+        //
+        // Closing a WAL database checkpoints it and unlinks the -wal only for the
+        // connection that can take an EXCLUSIVE file lock, i.e. the last one still
+        // attached. Closing the pool in parallel leaves each connection seeing the
+        // others, so none of them checkpoints; the writer therefore closes alone,
+        // after every reader is gone.
         static void Teardown(DBInstance *instance, v8::Persistent<v8::Promise::Resolver> *persistentResolver)
         {
             instance->self.Reset();
@@ -90,16 +113,18 @@ namespace NSCSQLite
                 return instance;
 
             auto isolate = args.GetIsolate();
-            auto err = v8::Exception::Error(V8Helpers::ToV8String(isolate, "database is closed"));
             if (async)
             {
                 auto resolver = V8Helpers::NewResolver(isolate);
-                resolver->Reject(isolate->GetCurrentContext(), err).IsJust();
+                auto ctx = isolate->GetCurrentContext();
+                auto errObj = v8::Exception::Error(V8Helpers::ToV8String(isolate, "database is closed")).As<v8::Object>();
+                V8Helpers::SetProp(isolate, ctx, errObj, "code", v8::Integer::New(isolate, SQLITE_MISUSE));
+                resolver->Reject(ctx, errObj).IsJust();
                 args.GetReturnValue().Set(resolver->GetPromise());
             }
             else
             {
-                isolate->ThrowException(err);
+                ThrowSQLiteError(isolate, "database is closed", SQLITE_MISUSE);
             }
             return nullptr;
         }
@@ -203,6 +228,7 @@ namespace NSCSQLite
 
             OpenOptions opts;
             opts.path = V8Helpers::FromV8String(isolate, args[0]);
+            bool serialized = false;
 
             if (args.Length() > 1 && args[1]->IsObject())
             {
@@ -222,62 +248,85 @@ namespace NSCSQLite
                 auto encKeyVal = optionsObj->Get(ctx, V8Helpers::ToV8String(isolate, "encryptionKey")).ToLocalChecked();
                 if (encKeyVal->IsString())
                     opts.encryptionKey = V8Helpers::FromV8String(isolate, encKeyVal);
+
+                auto onOpenVal = optionsObj->Get(ctx, V8Helpers::ToV8String(isolate, "onOpen")).ToLocalChecked();
+                if (onOpenVal->IsArray())
+                {
+                    auto onOpenArr = onOpenVal.As<v8::Array>();
+                    uint32_t len = onOpenArr->Length();
+                    opts.onOpen.reserve(len);
+                    for (uint32_t i = 0; i < len; ++i)
+                    {
+                        auto item = onOpenArr->Get(ctx, i).ToLocalChecked();
+                        if (!item->IsString())
+                            continue;
+                        std::string stmt = V8Helpers::FromV8String(isolate, item);
+                        if (!stmt.empty())
+                            opts.onOpen.push_back(std::move(stmt));
+                    }
+                }
+
+                auto serializedVal = optionsObj->Get(ctx, V8Helpers::ToV8String(isolate, "serialized")).ToLocalChecked();
+                if (serializedVal->IsBoolean())
+                    serialized = serializedVal->BooleanValue(isolate);
             }
 
             int poolSize = opts.poolSize > 0 ? opts.poolSize : 4;
 
+            // Destroying the unique_ptr on any failure below closes every connection
+            // already opened and joins every dispatcher already started.
             auto instance = std::make_unique<DBInstance>();
             instance->isolate = isolate;
             instance->adapter = std::make_unique<V8RuntimeAdapter>(isolate);
 
-            // Writer (NOMUTEX — exclusively owned by the writer thread)
-            // SQLiteConnection constructor sets PRAGMA journal_mode=WAL on the writer.
+            // Serialized: FULLMUTEX, because the JS thread runs the sync methods
+            // straight on this connection while the dispatcher thread uses it too.
+            // Pooled: NOMUTEX, exclusively owned by the writer thread.
             OpenOptions writerOpts = opts;
-            writerOpts.noMutex = true;
+            writerOpts.noMutex = !serialized;
+            writerOpts.journalWAL = !opts.readOnly;
             instance->writerDb = std::make_unique<SQLiteConnection>(writerOpts);
             if (!instance->writerDb->isOpen())
             {
-                isolate->ThrowException(v8::Exception::Error(
-                    V8Helpers::ToV8String(isolate, instance->writerDb->lastError())));
+                ThrowSQLiteError(isolate, instance->writerDb->lastError(), instance->writerDb->lastCode());
                 return;
             }
             instance->writerDispatcher = std::make_unique<AndroidDispatcher>(1);
             instance->writerDispatcher->attachToRuntimeThread(isolate);
 
-            // Readers (NOMUTEX + query_only, one dedicated thread each)
-            // Open as READWRITE so each connection can initialise WAL shared memory;
-            // PRAGMA query_only=ON prevents accidental writes through reader connections.
-            for (int i = 0; i < poolSize; ++i)
+            if (!serialized)
             {
-                OpenOptions readerOpts = opts;
-                readerOpts.noMutex = true;
-                auto readerDb = std::make_unique<SQLiteConnection>(readerOpts);
-                if (!readerDb->isOpen())
+                // Readers (NOMUTEX + query_only, one dedicated thread each)
+                // Open as READWRITE so each connection can initialise WAL shared memory;
+                // PRAGMA query_only=ON prevents accidental writes through reader connections.
+                for (int i = 0; i < poolSize; ++i)
                 {
-                    isolate->ThrowException(v8::Exception::Error(
-                        V8Helpers::ToV8String(isolate, readerDb->lastError())));
+                    OpenOptions readerOpts = opts;
+                    readerOpts.noMutex = true;
+                    readerOpts.queryOnly = !opts.readOnly;
+                    auto readerDb = std::make_unique<SQLiteConnection>(readerOpts);
+                    if (!readerDb->isOpen())
+                    {
+                        ThrowSQLiteError(isolate, readerDb->lastError(), readerDb->lastCode());
+                        return;
+                    }
+                    instance->readerDbs.push_back(std::move(readerDb));
+
+                    auto readerDispatcher = std::make_unique<AndroidDispatcher>(1);
+                    readerDispatcher->attachToRuntimeThread(isolate);
+                    instance->readerDispatchers.push_back(std::move(readerDispatcher));
+                }
+
+                // Sync connection (NOMUTEX, JS thread only)
+                OpenOptions syncOpts = opts;
+                syncOpts.noMutex = true;
+                syncOpts.journalWAL = !opts.readOnly;
+                instance->syncDb = std::make_unique<SQLiteConnection>(syncOpts);
+                if (!instance->syncDb->isOpen())
+                {
+                    ThrowSQLiteError(isolate, instance->syncDb->lastError(), instance->syncDb->lastCode());
                     return;
                 }
-                if (!opts.readOnly)
-                {
-                    readerDb->execute("PRAGMA query_only=ON", {});
-                }
-                instance->readerDbs.push_back(std::move(readerDb));
-
-                auto readerDispatcher = std::make_unique<AndroidDispatcher>(1);
-                readerDispatcher->attachToRuntimeThread(isolate);
-                instance->readerDispatchers.push_back(std::move(readerDispatcher));
-            }
-
-            // Sync connection (NOMUTEX, JS thread only)
-            OpenOptions syncOpts = opts;
-            syncOpts.noMutex = true;
-            instance->syncDb = std::make_unique<SQLiteConnection>(syncOpts);
-            if (!instance->syncDb->isOpen())
-            {
-                isolate->ThrowException(v8::Exception::Error(
-                    V8Helpers::ToV8String(isolate, instance->syncDb->lastError())));
-                return;
             }
 
             DBInstance *raw = instance.release();
@@ -336,10 +385,13 @@ namespace NSCSQLite
                 });
         }
 
-        // Round-robin reader selection.
+        // Round-robin reader selection; serialized mode has no pool and reads on
+        // the writer.
         static std::pair<AndroidDispatcher *, SQLiteConnection *> NextReader(DBInstance *instance)
         {
             int n = static_cast<int>(instance->readerDispatchers.size());
+            if (n == 0)
+                return {instance->writerDispatcher.get(), instance->writerDb.get()};
             int idx = instance->readerIndex.fetch_add(1, std::memory_order_relaxed) % n;
             return {instance->readerDispatchers[idx].get(), instance->readerDbs[idx].get()};
         }
@@ -451,7 +503,7 @@ namespace NSCSQLite
 
         static void SyncExecute(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args, true);
+            auto *instance = GetInstance(args, false);
             if (!instance)
                 return;
 
@@ -459,10 +511,10 @@ namespace NSCSQLite
             std::string sql = V8Helpers::FromV8String(isolate, args[0]);
             ParamList params = ParseParams(isolate, args[1]);
 
-            QueryResult res = instance->syncDb->execute(sql, params);
+            QueryResult res = instance->syncConnection()->execute(sql, params);
             if (!res.success)
             {
-                isolate->ThrowException(v8::Exception::Error(V8Helpers::ToV8String(isolate, res.error)));
+                ThrowSQLiteError(isolate, res.error, res.errorCode);
                 return;
             }
 
@@ -471,7 +523,7 @@ namespace NSCSQLite
 
         static void SyncSelect(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args, true);
+            auto *instance = GetInstance(args, false);
             if (!instance)
                 return;
 
@@ -479,10 +531,10 @@ namespace NSCSQLite
             std::string sql = V8Helpers::FromV8String(isolate, args[0]);
             ParamList params = ParseParams(isolate, args[1]);
 
-            QueryResult res = instance->syncDb->execute(sql, params);
+            QueryResult res = instance->syncConnection()->execute(sql, params);
             if (!res.success)
             {
-                isolate->ThrowException(v8::Exception::Error(V8Helpers::ToV8String(isolate, res.error)));
+                ThrowSQLiteError(isolate, res.error, res.errorCode);
                 return;
             }
 
@@ -491,7 +543,7 @@ namespace NSCSQLite
 
         static void SyncSelectArray(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args, true);
+            auto *instance = GetInstance(args, false);
             if (!instance)
                 return;
 
@@ -499,10 +551,10 @@ namespace NSCSQLite
             std::string sql = V8Helpers::FromV8String(isolate, args[0]);
             ParamList params = ParseParams(isolate, args[1]);
 
-            QueryResult res = instance->syncDb->execute(sql, params);
+            QueryResult res = instance->syncConnection()->execute(sql, params);
             if (!res.success)
             {
-                isolate->ThrowException(v8::Exception::Error(V8Helpers::ToV8String(isolate, res.error)));
+                ThrowSQLiteError(isolate, res.error, res.errorCode);
                 return;
             }
 
@@ -511,7 +563,7 @@ namespace NSCSQLite
 
         static void SyncGet(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args, true);
+            auto *instance = GetInstance(args, false);
             if (!instance)
                 return;
 
@@ -519,10 +571,10 @@ namespace NSCSQLite
             std::string sql = V8Helpers::FromV8String(isolate, args[0]);
             ParamList params = ParseParams(isolate, args[1]);
 
-            QueryResult res = instance->syncDb->executeGet(sql, params);
+            QueryResult res = instance->syncConnection()->executeGet(sql, params);
             if (!res.success)
             {
-                isolate->ThrowException(v8::Exception::Error(V8Helpers::ToV8String(isolate, res.error)));
+                ThrowSQLiteError(isolate, res.error, res.errorCode);
                 return;
             }
 
@@ -531,7 +583,7 @@ namespace NSCSQLite
 
         static void SyncGetArray(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args, true);
+            auto *instance = GetInstance(args, false);
             if (!instance)
                 return;
 
@@ -539,10 +591,10 @@ namespace NSCSQLite
             std::string sql = V8Helpers::FromV8String(isolate, args[0]);
             ParamList params = ParseParams(isolate, args[1]);
 
-            QueryResult res = instance->syncDb->executeGet(sql, params);
+            QueryResult res = instance->syncConnection()->executeGet(sql, params);
             if (!res.success)
             {
-                isolate->ThrowException(v8::Exception::Error(V8Helpers::ToV8String(isolate, res.error)));
+                ThrowSQLiteError(isolate, res.error, res.errorCode);
                 return;
             }
 
@@ -572,9 +624,7 @@ namespace NSCSQLite
                 res.success  = true;
                 res.insertId = stmtId;
             } else {
-                res.success   = false;
-                res.error     = wdb->lastError();
-                res.errorCode = wdb->lastCode();
+                res = wdb->errorResult();
             }
             return res; }, [](DBInstance *inst, void *ctx, const QueryResult &res)
                      { inst->adapter->resolveWithId(ctx, static_cast<uint32_t>(res.insertId)); });
@@ -665,9 +715,7 @@ namespace NSCSQLite
                 res.success  = true;
                 res.insertId = txId;
             } else {
-                res.success   = false;
-                res.error     = wdb->lastError();
-                res.errorCode = wdb->lastCode();
+                res = wdb->errorResult();
             }
             return res; }, [](DBInstance *inst, void *ctx, const QueryResult &res)
                      { inst->adapter->resolveWithId(ctx, static_cast<uint32_t>(res.insertId)); });
@@ -766,7 +814,7 @@ namespace NSCSQLite
 
         static void GetRuntimeInfo(const v8::FunctionCallbackInfo<v8::Value> &args)
         {
-            auto *instance = GetInstance(args, true);
+            auto *instance = GetInstance(args, false);
             if (!instance)
                 return;
 

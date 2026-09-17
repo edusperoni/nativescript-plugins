@@ -1,6 +1,6 @@
-import { DatabaseOptions, RuntimeInfo, SQLiteArrayResult, SQLiteDatabase, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, Transaction, ReadTransaction, PreparedStatement } from './common';
+import { DatabaseOptions, RuntimeInfo, SQLITE_ERROR, SQLiteArrayResult, SQLiteDatabase, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, Transaction, ReadTransaction, PreparedStatement, isInMemoryPath, resolveEncryptionKey } from './common';
 
-export { DatabaseOptions, RuntimeInfo, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, ReadTransaction, Transaction, PreparedStatement };
+export { DatabaseOptions, RuntimeInfo, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, ReadTransaction, Transaction, PreparedStatement, isInMemoryPath, resolveEncryptionKey };
 export type { SQLiteDatabase };
 export {
 	SQLITE_OK,
@@ -70,6 +70,15 @@ function loadNativeClass(): any {
 
 const NSCSQLite = loadNativeClass();
 
+interface NativeOpenOptions {
+	readOnly: boolean;
+	poolSize: number;
+	busyTimeout: number;
+	encryptionKey: string | null;
+	onOpen: string[];
+	serialized: boolean;
+}
+
 // The native layer rejects/throws plain Error objects with a `.code` number
 // property.  Re-wrap them as SQLiteError so callers can use `instanceof`.
 function rewrapNativeError(e: unknown): never {
@@ -78,6 +87,12 @@ function rewrapNativeError(e: unknown): never {
 		throw new SQLiteError((e as Error).message ?? String(e), (e as any).code);
 	}
 	throw e;
+}
+
+function toOpenError(e: any, path: string): never {
+	const code = typeof e?.code === 'number' ? e.code : SQLITE_ERROR;
+	const message = e?.message;
+	throw new SQLiteError(message ? `Failed to open database "${path}": ${message}` : `Failed to open database: ${path}`, code);
 }
 
 class PreparedStatementImpl implements PreparedStatement {
@@ -206,16 +221,31 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 	private _isOpen = false;
 
 	constructor(options: DatabaseOptions) {
+		const serialized = options.serialized ?? isInMemoryPath(options.path);
+		const native: NativeOpenOptions = {
+			readOnly: options.readOnly ?? false,
+			poolSize: options.poolSize ?? 4,
+			busyTimeout: options.busyTimeout ?? 5000,
+			encryptionKey: resolveEncryptionKey(options),
+			onOpen: options.onOpen ?? [],
+			serialized,
+		};
+
 		// Each sqlite3_open_v2(':memory:') call creates a new independent in-memory
-		// database, so the writer, readers, and sync connections would each get their
-		// own isolated database. Fix: translate ':memory:' to a named shared-cache URI
-		// so all pool connections share a single in-memory database instance.
-		// Requires SQLITE_OPEN_URI in the C++ layer (sqlite_connection.cpp).
-		if (options.path === ':memory:') {
+		// database, so a pool's connections would each get their own.  A shared-cache
+		// URI gives them one database instead; it is only needed when the caller has
+		// opted out of serialized mode, which otherwise opens a single connection.
+		let path = options.path;
+		if (!serialized && path === ':memory:') {
 			const uid = `_nscmem_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-			options = { ...options, path: `file:${uid}?mode=memory&cache=shared` };
+			path = `file:${uid}?mode=memory&cache=shared`;
 		}
-		this._db = new NSCSQLite(options.path, options);
+
+		try {
+			this._db = new NSCSQLite(path, native);
+		} catch (e) {
+			toOpenError(e, options.path);
+		}
 		this._isOpen = true;
 	}
 

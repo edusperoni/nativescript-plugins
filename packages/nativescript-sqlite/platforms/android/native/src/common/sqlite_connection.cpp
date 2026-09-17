@@ -8,11 +8,64 @@
 
 namespace NSCSQLite {
 
+namespace {
+
+// Renders the key as the operand of PRAGMA key, doubling any embedded quote so a
+// key containing one can neither break the statement nor inject into it.
+// SQLCipher's raw-key form x'<hex>' is recognised from the string value, so it is
+// quoted like any other key; emitting it bare would be a blob literal, which
+// PRAGMA does not accept.
+std::string encryptionKeyLiteral(const std::string& key) {
+    std::string literal;
+    literal.reserve(key.size() + 2);
+    literal.push_back('\'');
+    for (char c : key) {
+        if (c == '\'') literal.push_back('\'');
+        literal.push_back(c);
+    }
+    literal.push_back('\'');
+    return literal;
+}
+
+constexpr const char* kThreadUnsafeMessage =
+    "the linked SQLite was built with SQLITE_THREADSAFE=0; nscsqlite requires a "
+    "thread-safe SQLite (build it with SQLITE_THREADSAFE=2)";
+
+#ifdef NSCSQLITE_ENGINE_HAS_NO_CODEC
+// Only the plugin's own codec-less preset defines this. An app-supplied engine
+// never does, because encryption there may live in a VFS with no codec symbols
+// to detect.
+constexpr const char* kNoCodecMessage =
+    "this build uses the bundled SQLite, which cannot encrypt; select "
+    "nscsqlite.sqlite=sqlite3mc or provide your own SQLite";
+#endif
+
+bool sqliteIsThreadSafe() {
+    static const bool threadSafe = sqlite3_threadsafe() != 0;
+    return threadSafe;
+}
+
+} // namespace
+
 // ── Construction / destruction ───────────────────────────────────────────────
 
 SQLiteConnection::SQLiteConnection(const OpenOptions& opts)
     : path_(opts.path)
 {
+#ifdef NSCSQLITE_ENGINE_HAS_NO_CODEC
+    // PRAGMA key is a silent no-op without a codec, which would write plaintext
+    // under a caller who asked for encryption.
+    if (!opts.encryptionKey.empty()) {
+        setError(kNoCodecMessage, SQLITE_MISUSE);
+        return;
+    }
+#endif
+
+    if (!sqliteIsThreadSafe()) {
+        setError(kThreadUnsafeMessage, SQLITE_MISUSE);
+        return;
+    }
+
     // SQLITE_OPEN_URI is always added so callers can use URI filenames (e.g.
     // file:name?mode=memory&cache=shared for shared in-memory databases).
     // It is a no-op for regular file paths.
@@ -26,36 +79,51 @@ SQLiteConnection::SQLiteConnection(const OpenOptions& opts)
 
     int rc = sqlite3_open_v2(opts.path.c_str(), &db_, flags, nullptr);
     if (rc != SQLITE_OK) {
-        const char* msg = db_ ? sqlite3_errmsg(db_) : "out of memory";
-        setError(std::string("Failed to open: ") + msg, rc);
+        // sqlite3_open_v2 still hands back a handle on most failures, and the
+        // message only lives on that handle — so read it before closing.
+        setError(db_ ? sqlite3_errmsg(db_) : "out of memory allocating the database handle", rc);
         if (db_) { sqlite3_close(db_); db_ = nullptr; }
         return;
     }
 
-    // busy timeout
     if (opts.busyTimeoutMs > 0)
         sqlite3_busy_timeout(db_, opts.busyTimeoutMs);
 
     // Encryption (SQLCipher / SEE pattern)
     if (!opts.encryptionKey.empty()) {
-        std::string pragma = "PRAGMA key = '" + opts.encryptionKey + "'";
-        char* errmsg = nullptr;
-        rc = sqlite3_exec(db_, pragma.c_str(), nullptr, nullptr, &errmsg);
-        if (rc != SQLITE_OK) {
-            std::string msg = errmsg ? errmsg : "encryption key failed";
-            sqlite3_free(errmsg);
-            setError(msg, rc);
-            sqlite3_close(db_); db_ = nullptr;
+        if (!runOpenStatement("PRAGMA key = " + encryptionKeyLiteral(opts.encryptionKey)))
             return;
-        }
     }
 
-    // Enable WAL for better read concurrency
-    if (!opts.readOnly) {
-        char* errmsg = nullptr;
-        sqlite3_exec(db_, "PRAGMA journal_mode=WAL", nullptr, nullptr, &errmsg);
-        sqlite3_free(errmsg);
+    // Runs after the key, so these statements are the first ones that can read the
+    // database. That ordering is the point: setup which needs a readable schema —
+    // registering an FTS5 tokenizer, for instance — cannot use
+    // sqlite3_auto_extension, because auto-extensions run inside sqlite3_open_v2,
+    // before any key has been applied.
+    for (const std::string& sql : opts.onOpen) {
+        if (sql.empty()) continue;
+        if (!runOpenStatement(sql)) return;
     }
+
+    if (opts.journalWAL && !runOpenStatement("PRAGMA journal_mode=WAL"))
+        return;
+
+    if (opts.queryOnly && !runOpenStatement("PRAGMA query_only=ON"))
+        return;
+}
+
+bool SQLiteConnection::runOpenStatement(const std::string& sql) {
+    char* errmsg = nullptr;
+    int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &errmsg);
+    if (rc == SQLITE_OK) {
+        sqlite3_free(errmsg);
+        return true;
+    }
+    std::string msg = errmsg ? errmsg : sqlite3_errmsg(db_);
+    sqlite3_free(errmsg);
+    setError(msg, rc);
+    close();
+    return false;
 }
 
 SQLiteConnection::~SQLiteConnection() {
@@ -63,6 +131,7 @@ SQLiteConnection::~SQLiteConnection() {
 }
 
 void SQLiteConnection::close() {
+    DbGuard guard(opMutex_);
     if (!db_) return;
     for (auto& kv : execCache_) {
         sqlite3_finalize(kv.second);
@@ -77,12 +146,26 @@ void SQLiteConnection::close() {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 void SQLiteConnection::setError(const std::string& msg, int code) {
-    lastError_ = msg;
-    lastCode_  = code;
+    {
+        std::lock_guard<std::mutex> lk(errorMutex_);
+        lastError_ = msg;
+        lastCode_  = code;
+    }
     LogError("[SQLiteConnection] " + msg + " (code=" + std::to_string(code) + ")");
 }
 
+std::string SQLiteConnection::lastError() const {
+    std::lock_guard<std::mutex> lk(errorMutex_);
+    return lastError_;
+}
+
+int SQLiteConnection::lastCode() const {
+    std::lock_guard<std::mutex> lk(errorMutex_);
+    return lastCode_;
+}
+
 QueryResult SQLiteConnection::errorResult() const {
+    std::lock_guard<std::mutex> lk(errorMutex_);
     QueryResult r;
     r.success   = false;
     r.error     = lastError_;
@@ -229,6 +312,7 @@ bool SQLiteConnection::prepareOne(const std::string& sql, sqlite3_stmt** out, bo
 }
 
 QueryResult SQLiteConnection::execute(const std::string& sql, const ParamList& params) {
+    DbGuard guard(opMutex_);
     if (!db_) { setError("database is closed", SQLITE_MISUSE); return errorResult(); }
 
     sqlite3_stmt* stmt = nullptr;
@@ -283,6 +367,7 @@ QueryResult SQLiteConnection::execute(const std::string& sql, const ParamList& p
 }
 
 QueryResult SQLiteConnection::executeGet(const std::string& sql, const ParamList& params) {
+    DbGuard guard(opMutex_);
     QueryResult result = execute(sql, params);
     if (result.success && result.rows.size() > 1) {
         result.rows.resize(1); // keep only first row
@@ -293,6 +378,7 @@ QueryResult SQLiteConnection::executeGet(const std::string& sql, const ParamList
 // ── Prepared statements ───────────────────────────────────────────────────────
 
 uint32_t SQLiteConnection::prepareStatement(const std::string& sql) {
+    DbGuard guard(opMutex_);
     if (!db_) { setError("database is closed", SQLITE_MISUSE); return 0; }
 
     sqlite3_stmt* stmt = nullptr;
@@ -304,6 +390,7 @@ uint32_t SQLiteConnection::prepareStatement(const std::string& sql) {
 }
 
 QueryResult SQLiteConnection::stepStatement(uint32_t stmtId, const ParamList& params) {
+    DbGuard guard(opMutex_);
     PreparedStmt* ps = stmtRegistry_.get(stmtId);
     if (!ps) {
         setError("invalid statement handle " + std::to_string(stmtId), SQLITE_MISUSE);
@@ -319,6 +406,7 @@ QueryResult SQLiteConnection::stepStatement(uint32_t stmtId, const ParamList& pa
 }
 
 void SQLiteConnection::finalizeStatement(uint32_t stmtId) {
+    DbGuard guard(opMutex_);
     stmtRegistry_.remove(stmtId); // destructor calls sqlite3_finalize
 }
 
@@ -329,6 +417,7 @@ bool SQLiteConnection::hasStatement(uint32_t stmtId) const {
 // ── Transactions ──────────────────────────────────────────────────────────────
 
 uint32_t SQLiteConnection::beginTransaction(TxBehavior behavior) {
+    DbGuard guard(opMutex_);
     if (!db_) { setError("database is closed", SQLITE_MISUSE); return 0; }
 
     const char* beginSql = "BEGIN";
@@ -354,6 +443,7 @@ uint32_t SQLiteConnection::beginTransaction(TxBehavior behavior) {
 }
 
 QueryResult SQLiteConnection::executeInTransaction(uint32_t txId, const std::string& sql, const ParamList& params) {
+    DbGuard guard(opMutex_);
     if (!txRegistry_.contains(txId)) {
         setError("invalid transaction id " + std::to_string(txId), SQLITE_MISUSE);
         return errorResult();
@@ -362,10 +452,12 @@ QueryResult SQLiteConnection::executeInTransaction(uint32_t txId, const std::str
 }
 
 QueryResult SQLiteConnection::selectInTransaction(uint32_t txId, const std::string& sql, const ParamList& params) {
+    DbGuard guard(opMutex_);
     return executeInTransaction(txId, sql, params);
 }
 
 void SQLiteConnection::commitTransaction(uint32_t txId) {
+    DbGuard guard(opMutex_);
     if (!txRegistry_.contains(txId)) { setError("invalid tx id", SQLITE_MISUSE); return; }
     char* errmsg = nullptr;
     sqlite3_exec(db_, "COMMIT", nullptr, nullptr, &errmsg);
@@ -374,6 +466,7 @@ void SQLiteConnection::commitTransaction(uint32_t txId) {
 }
 
 void SQLiteConnection::rollbackTransaction(uint32_t txId) {
+    DbGuard guard(opMutex_);
     if (!txRegistry_.contains(txId)) { setError("invalid tx id", SQLITE_MISUSE); return; }
     char* errmsg = nullptr;
     sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, &errmsg);
@@ -388,6 +481,7 @@ bool SQLiteConnection::hasTransaction(uint32_t txId) const {
 // ── Savepoints ────────────────────────────────────────────────────────────────
 
 void SQLiteConnection::savepoint(uint32_t txId, const std::string& name) {
+    DbGuard guard(opMutex_);
     if (!txRegistry_.contains(txId)) return;
     std::string sql = "SAVEPOINT " + name;
     char* errmsg = nullptr;
@@ -396,6 +490,7 @@ void SQLiteConnection::savepoint(uint32_t txId, const std::string& name) {
 }
 
 void SQLiteConnection::releaseSavepoint(uint32_t txId, const std::string& name) {
+    DbGuard guard(opMutex_);
     if (!txRegistry_.contains(txId)) return;
     std::string sql = "RELEASE SAVEPOINT " + name;
     char* errmsg = nullptr;
@@ -404,6 +499,7 @@ void SQLiteConnection::releaseSavepoint(uint32_t txId, const std::string& name) 
 }
 
 void SQLiteConnection::rollbackToSavepoint(uint32_t txId, const std::string& name) {
+    DbGuard guard(opMutex_);
     if (!txRegistry_.contains(txId)) return;
     std::string sql = "ROLLBACK TO SAVEPOINT " + name;
     char* errmsg = nullptr;
@@ -418,12 +514,15 @@ RuntimeInfo SQLiteConnection::getRuntimeInfo() const {
     info.version  = sqlite3_libversion();
     info.sourceId = sqlite3_sourceid();
 
-    // Enumerate known compile options
+    // sqlite3_compileoption_get() is absent from a build made with
+    // SQLITE_OMIT_COMPILEOPTION_DIAGS; compileOptions stays empty there.
+#ifndef SQLITE_OMIT_COMPILEOPTION_DIAGS
     for (int i = 0; ; ++i) {
         const char* opt = sqlite3_compileoption_get(i);
         if (!opt) break;
         info.compileOptions.push_back(opt);
     }
+#endif
     return info;
 }
 
@@ -559,6 +658,7 @@ QueryResult SQLiteConnection::runStatementAsJson(sqlite3_stmt* stmt,
 // ── JSON public methods ───────────────────────────────────────────────────────
 
 QueryResult SQLiteConnection::executeJson(const std::string& sql, const ParamList& params) {
+    DbGuard guard(opMutex_);
     if (!db_) { setError("database is closed", SQLITE_MISUSE); return errorResult(); }
     sqlite3_stmt* stmt = nullptr;
     if (!prepareOne(sql, &stmt)) return errorResult();
@@ -570,6 +670,7 @@ QueryResult SQLiteConnection::executeJson(const std::string& sql, const ParamLis
 }
 
 QueryResult SQLiteConnection::executeGetJson(const std::string& sql, const ParamList& params) {
+    DbGuard guard(opMutex_);
     if (!db_) { setError("database is closed", SQLITE_MISUSE); return errorResult(); }
     sqlite3_stmt* stmt = nullptr;
     if (!prepareOne(sql, &stmt)) return errorResult();
@@ -581,6 +682,7 @@ QueryResult SQLiteConnection::executeGetJson(const std::string& sql, const Param
 }
 
 QueryResult SQLiteConnection::executeArrayJson(const std::string& sql, const ParamList& params) {
+    DbGuard guard(opMutex_);
     if (!db_) { setError("database is closed", SQLITE_MISUSE); return errorResult(); }
     sqlite3_stmt* stmt = nullptr;
     if (!prepareOne(sql, &stmt)) return errorResult();
@@ -592,6 +694,7 @@ QueryResult SQLiteConnection::executeArrayJson(const std::string& sql, const Par
 }
 
 QueryResult SQLiteConnection::executeGetArrayJson(const std::string& sql, const ParamList& params) {
+    DbGuard guard(opMutex_);
     if (!db_) { setError("database is closed", SQLITE_MISUSE); return errorResult(); }
     sqlite3_stmt* stmt = nullptr;
     if (!prepareOne(sql, &stmt)) return errorResult();
@@ -605,6 +708,7 @@ QueryResult SQLiteConnection::executeGetArrayJson(const std::string& sql, const 
 QueryResult SQLiteConnection::selectInTransactionJson(uint32_t txId,
                                                        const std::string& sql,
                                                        const ParamList& params) {
+    DbGuard guard(opMutex_);
     if (!txRegistry_.contains(txId)) {
         setError("invalid transaction id " + std::to_string(txId), SQLITE_MISUSE);
         return errorResult();
@@ -615,6 +719,7 @@ QueryResult SQLiteConnection::selectInTransactionJson(uint32_t txId,
 QueryResult SQLiteConnection::selectInTransactionArrayJson(uint32_t txId,
                                                             const std::string& sql,
                                                             const ParamList& params) {
+    DbGuard guard(opMutex_);
     if (!txRegistry_.contains(txId)) {
         setError("invalid transaction id " + std::to_string(txId), SQLITE_MISUSE);
         return errorResult();
@@ -625,6 +730,7 @@ QueryResult SQLiteConnection::selectInTransactionArrayJson(uint32_t txId,
 QueryResult SQLiteConnection::stepStatementJson(uint32_t stmtId,
                                                  const ParamList& params,
                                                  bool firstOnly) {
+    DbGuard guard(opMutex_);
     PreparedStmt* ps = stmtRegistry_.get(stmtId);
     if (!ps) { setError("invalid statement handle " + std::to_string(stmtId), SQLITE_MISUSE); return errorResult(); }
     std::lock_guard<std::mutex> lock(ps->mtx);
@@ -637,6 +743,7 @@ QueryResult SQLiteConnection::stepStatementJson(uint32_t stmtId,
 QueryResult SQLiteConnection::stepStatementArrayJson(uint32_t stmtId,
                                                       const ParamList& params,
                                                       bool firstOnly) {
+    DbGuard guard(opMutex_);
     PreparedStmt* ps = stmtRegistry_.get(stmtId);
     if (!ps) { setError("invalid statement handle " + std::to_string(stmtId), SQLITE_MISUSE); return errorResult(); }
     std::lock_guard<std::mutex> lock(ps->mtx);

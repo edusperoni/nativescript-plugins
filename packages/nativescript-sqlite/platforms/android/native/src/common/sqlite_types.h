@@ -100,8 +100,15 @@ namespace NSCSQLite
         bool readOnly{false};
         bool noMutex{false}; // SQLITE_OPEN_NOMUTEX — safe when only one thread accesses this connection; enables stmt cache
         int busyTimeoutMs{5000};
-        std::string encryptionKey{}; // maps to PRAGMA key = ?
-        int poolSize{0};             // 0 = hardware_concurrency
+        // Operand of PRAGMA key, already resolved by the JS layer — the connection
+        // quotes it but never reinterprets it.
+        std::string encryptionKey{};
+        // Run on this connection after PRAGMA key and before journalWAL/queryOnly.
+        // A statement that fails aborts the open.
+        std::vector<std::string> onOpen{};
+        bool journalWAL{false}; // PRAGMA journal_mode=WAL
+        bool queryOnly{false};  // PRAGMA query_only=ON
+        int poolSize{0};        // 0 = hardware_concurrency
     };
 
 } // namespace NSCSQLite

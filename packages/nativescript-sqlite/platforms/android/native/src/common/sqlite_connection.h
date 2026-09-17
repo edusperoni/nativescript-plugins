@@ -3,7 +3,8 @@
 // ---------------------------------------------------------------------------
 // SQLiteConnection — Layer 3: Pure SQLite execution.
 // NO V8, NO JNI, NO Android-specific code except sqlite3.h.
-// All methods are called from worker threads.
+// A pooled connection is used by one worker thread. A serialized connection
+// (opts.noMutex == false) is used by a worker thread and the JS thread at once.
 // ---------------------------------------------------------------------------
 
 #include "sqlite_types.h"
@@ -59,8 +60,11 @@ public:
     SQLiteConnection& operator=(const SQLiteConnection&) = delete;
 
     bool        isOpen()     const { return db_ != nullptr; }
-    std::string lastError()  const { return lastError_; }
-    int         lastCode()   const { return lastCode_; }
+    std::string lastError()  const;
+    int         lastCode()   const;
+
+    // Message and code of the last failure, read as one unit.
+    QueryResult errorResult() const;
 
     // ── Execute ─────────────────────────────────────────────────────────────
     // Runs SQL, binds params, returns full QueryResult (rows + metadata).
@@ -113,21 +117,35 @@ public:
 private:
     enum class QueryFormat { ObjectRows, ArrayRows };
 
+    using DbGuard = std::lock_guard<std::recursive_mutex>;
+
     // Helpers
     QueryResult runStatement(sqlite3_stmt* stmt);
     QueryResult runStatementAsJson(sqlite3_stmt* stmt, QueryFormat format, bool firstOnly = false);
     bool        prepareOne(const std::string& sql, sqlite3_stmt** out, bool* isMulti = nullptr);
     void        bindParams(sqlite3_stmt* stmt, const ParamList& params);
     void        setError(const std::string& msg, int code);
-    QueryResult errorResult() const;
+
+    // Runs one open-time statement; on failure records the error, closes the
+    // handle and returns false, leaving the connection not-open.
+    bool        runOpenStatement(const std::string& sql);
 
     sqlite3*    db_{nullptr};
     std::string path_{};
+
+    // Held end to end by every public operation. SQLITE_OPEN_FULLMUTEX only makes
+    // each individual SQLite call safe, which is not enough for a serialized
+    // connection: between a failing call and the sqlite3_errmsg() that explains
+    // it, the other thread can clear or free that text, and it can swap
+    // sqlite3_changes()/last_insert_rowid() out from under a finished statement.
+    // Recursive because the operations delegate to each other.
+    mutable std::recursive_mutex opMutex_;
+
+    // A serialized connection is reached from both the dispatcher thread and the
+    // JS thread, so the last-error pair needs its own lock.
+    mutable std::mutex errorMutex_;
     std::string lastError_{};
     int         lastCode_{SQLITE_OK};
-
-    // Write serialization — SQLite serialized mode or WAL with a write mutex
-    mutable std::mutex writeMutex_;
 
     // Prepared-statement cache — only active for noMutex (single-threaded) connections.
     // Workers must NOT use this path; concurrent bind/step on the same stmt is unsafe.
