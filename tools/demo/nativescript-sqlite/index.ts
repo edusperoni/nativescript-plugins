@@ -1,6 +1,9 @@
 ﻿import { knownFolders, File } from '@nativescript/core';
 import { DemoSharedBase } from '../utils';
 import { openDatabase, SQLiteDatabase, SQLiteError, SQLITE_CONSTRAINT, SQLITE_ERROR } from '@edusperoni/nativescript-sqlite';
+import { runBenchmarks } from './benchmark';
+
+export { runBenchmarks } from './benchmark';
 
 // ─── Tiny assertion helpers ────────────────────────────────────────────────────
 function assert(condition: boolean, msg: string): asserts condition {
@@ -625,180 +628,13 @@ n      INTEGER
 		}
 	}
 
-	// ── Benchmarks ────────────────────────────────────────────────────────────
-
-	async benchmarkBulkInsert() {
-		const TAG = '[Bench:BulkInsert]';
-		const N = 2000;
-
-		// Use a unique name so concurrent invocations don't share or corrupt the same file.
-		const db1Path = tempDb(`bench_insert_${Date.now().toString(36)}.db`);
-		// 1. Autocommit
-		const db1 = openDatabase({ path: db1Path });
-		try {
-			await db1.execute(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`);
-			const t0 = Date.now();
-			for (let i = 0; i < N; i++) {
-				await db1.execute(`INSERT INTO t VALUES (?, ?)`, [i, `val${i}`]);
-			}
-			const autocommitMs = Date.now() - t0;
-
-			// 2. Transaction
-			await db1.execute(`DELETE FROM t`);
-			const t1 = Date.now();
-			await db1.transaction(async (tx) => {
-				for (let i = 0; i < N; i++) {
-					await tx.execute(`INSERT INTO t VALUES (?, ?)`, [i, `val${i}`]);
-				}
-			});
-			const txMs = Date.now() - t1;
-
-			// 3. Prepared statement in transaction
-			await db1.execute(`DELETE FROM t`);
-			const t2 = Date.now();
-			const stmt = await db1.prepare(`INSERT INTO t VALUES (?, ?)`);
-			await db1.transaction(async (_tx) => {
-				for (let i = 0; i < N; i++) {
-					await stmt.execute([i, `val${i}`]);
-				}
-			});
-			await stmt.finalize();
-			const preparedMs = Date.now() - t2;
-
-			console.log(TAG, `N=${N} | autocommit=${autocommitMs}ms | tx=${txMs}ms | prepared+tx=${preparedMs}ms`);
-		} finally {
-			await db1.close();
-			try {
-				File.fromPath(db1Path).remove();
-			} catch (_) {}
-		}
-	}
-
-	async benchmarkBulkSelect() {
-		const TAG = '[Bench:BulkSelect]';
-		const N = 2000;
-		const dbPath = tempDb(`bench_select_${Date.now().toString(36)}.db`);
-		const db = openDatabase({ path: dbPath });
-		try {
-			await db.execute(`CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, b REAL, c INTEGER)`);
-			await db.transaction(async (tx) => {
-				const stmt = await db.prepare(`INSERT INTO t VALUES (?, ?, ?, ?)`);
-				for (let i = 0; i < N; i++) {
-					await stmt.execute([i, `str${i}`, i * 1.5, i % 100]);
-				}
-				await stmt.finalize();
-			});
-
-			// 1. select (object rows)
-			const t0 = Date.now();
-			await db.select(`SELECT * FROM t`);
-			const objectMs = Date.now() - t0;
-
-			// 2. selectArray (array rows)
-			const t1 = Date.now();
-			await db.selectArray(`SELECT * FROM t`);
-			const arrayMs = Date.now() - t1;
-
-			// 3. selectSync (sync object rows)
-			const t2 = Date.now();
-			db.selectSync(`SELECT * FROM t`);
-			const syncMs = Date.now() - t2;
-
-			console.log(TAG, `N=${N} | object=${objectMs}ms | array=${arrayMs}ms | sync=${syncMs}ms`);
-		} finally {
-			await db.close();
-			try {
-				File.fromPath(dbPath).remove();
-			} catch (_) {}
-		}
-	}
-
-	async benchmarkConcurrentReads() {
-		const TAG = '[Bench:ConcurrentReads]';
-		const N = 50;
-		const POOL = 4;
-		const path = tempDb(`bench_concurrent_${Date.now().toString(36)}.db`);
-
-		// Seed data
-		const seed = openDatabase({ path });
-		try {
-			await seed.execute(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`);
-			await seed.transaction(async (tx) => {
-				for (let i = 0; i < 500; i++) await tx.execute(`INSERT INTO t VALUES (?, ?)`, [i, `v${i}`]);
-			});
-		} finally {
-			await seed.close();
-		}
-
-		// Sequential (pool=1)
-		const dbSeq = openDatabase({ path, readOnly: true });
-		try {
-			const t0 = Date.now();
-			for (let i = 0; i < N; i++) {
-				await dbSeq.select(`SELECT * FROM t WHERE id < 100`);
-			}
-			const seqMs = Date.now() - t0;
-
-			// Concurrent (poolSize > 1)
-			const dbPool = openDatabase({ path, readOnly: true, poolSize: POOL });
-			try {
-				const t1 = Date.now();
-				await Promise.all(Array.from({ length: N }, () => dbPool.select(`SELECT * FROM t WHERE id < 100`)));
-				const poolMs = Date.now() - t1;
-				console.log(TAG, `N=${N} queries | sequential=${seqMs}ms | pool(${POOL})=${poolMs}ms`);
-			} finally {
-				await dbPool.close();
-			}
-		} finally {
-			await dbSeq.close();
-			try {
-				File.fromPath(path).remove();
-			} catch (_) {}
-		}
-	}
-
-	async benchmarkPreparedVsDirect() {
-		const TAG = '[Bench:PreparedVsDirect]';
-		const N = 500;
-		const dbPath = tempDb(`bench_prep_${Date.now().toString(36)}.db`);
-		const db = openDatabase({ path: dbPath });
-		try {
-			await db.execute(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`);
-			await db.transaction(async (tx) => {
-				for (let i = 0; i < N; i++) await tx.execute(`INSERT INTO t VALUES (?, ?)`, [i, `v${i}`]);
-			});
-
-			// Direct query
-			const t0 = Date.now();
-			for (let i = 0; i < N; i++) {
-				await db.get(`SELECT v FROM t WHERE id = ?`, [i]);
-			}
-			const directMs = Date.now() - t0;
-
-			// Prepared query
-			const stmt = await db.prepare(`SELECT v FROM t WHERE id = ?`);
-			const t1 = Date.now();
-			for (let i = 0; i < N; i++) {
-				await stmt.get([i]);
-			}
-			await stmt.finalize();
-			const preparedMs = Date.now() - t1;
-
-			console.log(TAG, `N=${N} | direct=${directMs}ms | prepared=${preparedMs}ms`);
-		} finally {
-			await db.close();
-			try {
-				File.fromPath(dbPath).remove();
-			} catch (_) {}
-		}
-	}
+	// ── Benchmarks ──────────────────────────────────────────────────────────────
 
 	async benchmarkAll() {
-		console.log('[Bench] Starting all benchmarks...');
-		await this.benchmarkBulkInsert();
-		await this.benchmarkBulkSelect();
-		await this.benchmarkConcurrentReads();
-		await this.benchmarkPreparedVsDirect();
-		console.log('[Bench] All benchmarks complete');
+		await runBenchmarks();
+	}
+
+	async benchmarkQuick() {
+		await runBenchmarks({ quick: true });
 	}
 }

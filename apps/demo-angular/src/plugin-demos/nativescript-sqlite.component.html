@@ -24,11 +24,8 @@
 				<Button text="SQLCipher (Android optional dep)" (tap)="demoShared.testSQLCipher()" class="btn btn-outline m-b-5"></Button>
 
 				<Label text="─── Benchmarks ───" class="h3 text-center m-t-20 m-b-10"></Label>
-				<Button text="Run All Benchmarks" (tap)="demoShared.benchmarkAll()" class="btn btn-primary m-b-5"></Button>
-				<Button text="Bulk Insert (autocommit vs tx vs prepared)" (tap)="demoShared.benchmarkBulkInsert()" class="btn btn-outline m-b-5"></Button>
-				<Button text="Bulk Select (object vs array vs sync)" (tap)="demoShared.benchmarkBulkSelect()" class="btn btn-outline m-b-5"></Button>
-				<Button text="Concurrent Reads (pool)" (tap)="demoShared.benchmarkConcurrentReads()" class="btn btn-outline m-b-5"></Button>
-				<Button text="Prepared vs Direct" (tap)="demoShared.benchmarkPreparedVsDirect()" class="btn btn-outline m-b-5"></Button>
+				<Button text="Run Full Benchmark Suite" (tap)="demoShared.benchmarkAll()" class="btn btn-primary m-b-5"></Button>
+				<Button text="Run Quick Benchmark Suite (smoke)" (tap)="demoShared.benchmarkQuick()" class="btn btn-outline m-b-5"></Button>
 			</StackLayout>
 		</ScrollView>
 	</StackLayout>
