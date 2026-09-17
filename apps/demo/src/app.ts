@@ -1,7 +1,5 @@
 import { Application } from '@nativescript/core';
-import { runBenchmarks, RunBenchmarksOptions } from '../../../tools/demo/nativescript-sqlite/benchmark';
-import { runCorrectnessTests, RunCorrectnessTestsOptions } from '../../../tools/demo/nativescript-sqlite/test-suite';
-import { runEncryptedWalTest, RunEncryptedWalOptions } from '../../../tools/demo/nativescript-sqlite/encrypted-wal';
+import { runBenchmarks, RunBenchmarksOptions, runCorrectnessTests, RunCorrectnessTestsOptions, runEncryptedWalTest, RunEncryptedWalOptions } from '@demo/shared';
 
 const BENCH_START_DELAY_MS = 1500;
 const BENCH_LAUNCH_FALLBACK_MS = 6000;

@@ -4,6 +4,7 @@ import { DatabaseOptions, openDatabase, SQLiteDatabase, SQLiteError, SQLITE_BUSY
 import { runBenchmarks } from './benchmark';
 
 export { runBenchmarks } from './benchmark';
+export type { RunBenchmarksOptions } from './benchmark';
 
 // ─── Tiny assertion helpers ────────────────────────────────────────────────────
 function assert(condition: boolean, msg: string): asserts condition {
