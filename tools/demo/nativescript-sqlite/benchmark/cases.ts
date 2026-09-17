@@ -54,6 +54,10 @@ function makeBlob(bytes: number): ArrayBuffer {
 
 const MARSHAL_SQL = 'SELECT id, r, s, t, n, nt FROM m';
 
+function expectRows(caseName: string, actual: number, expected: number) {
+	if (actual !== expected) throw new Error(caseName + ' returned ' + actual + ' rows, expected ' + expected);
+}
+
 function seedMarshalTable(db: SQLiteDatabase, rows: number) {
 	db.executeSync('CREATE TABLE m (id INTEGER PRIMARY KEY, r REAL, s TEXT, t TEXT, n INTEGER, nt TEXT)');
 	const long = makeText(200, 7);
@@ -259,11 +263,11 @@ export function buildCases(quick: boolean): BenchCase[] {
 
 	// ── marshal ───────────────────────────────────────────────────────────────
 	const marshalRows = size(10000);
-	const marshalReads: { name: string; run: (db: SQLiteDatabase) => void | Promise<void> }[] = [
-		{ name: 'marshal/selectSync-objects', run: (db) => void db.selectSync(MARSHAL_SQL) },
-		{ name: 'marshal/selectArraySync', run: (db) => void db.selectArraySync(MARSHAL_SQL) },
-		{ name: 'marshal/select-objects-async', run: (db) => db.select(MARSHAL_SQL).then(() => undefined) },
-		{ name: 'marshal/selectArray-async', run: (db) => db.selectArray(MARSHAL_SQL).then(() => undefined) },
+	const marshalReads: { name: string; run: (db: SQLiteDatabase) => number | Promise<number> }[] = [
+		{ name: 'marshal/selectSync-objects', run: (db) => db.selectSync(MARSHAL_SQL).length },
+		{ name: 'marshal/selectArraySync', run: (db) => db.selectArraySync(MARSHAL_SQL).rows.length },
+		{ name: 'marshal/select-objects-async', run: (db) => db.select(MARSHAL_SQL).then((rows) => rows.length) },
+		{ name: 'marshal/selectArray-async', run: (db) => db.selectArray(MARSHAL_SQL).then((result) => result.rows.length) },
 	];
 	marshalReads.forEach((spec, index) => {
 		let db: SQLiteDatabase;
@@ -279,8 +283,8 @@ export function buildCases(quick: boolean): BenchCase[] {
 				path = created.path;
 				seedMarshalTable(db, marshalRows);
 			},
-			fn() {
-				return spec.run(db);
+			async fn() {
+				expectRows(spec.name, await spec.run(db), marshalRows);
 			},
 			async teardown() {
 				await db.close();
@@ -334,7 +338,7 @@ export function buildCases(quick: boolean): BenchCase[] {
 				db.executeSync('COMMIT');
 			},
 			fn() {
-				db.selectSync('SELECT id, body FROM w');
+				expectRows('marshal/wide-text', db.selectSync('SELECT id, body FROM w').length, rows);
 			},
 			async teardown() {
 				await db.close();
@@ -398,7 +402,7 @@ export function buildCases(quick: boolean): BenchCase[] {
 				db.executeSync('COMMIT');
 			},
 			fn() {
-				db.selectSync('SELECT id, data FROM b');
+				expectRows(spec.name, db.selectSync('SELECT id, data FROM b').length, spec.rows);
 			},
 			async teardown() {
 				await db.close();
