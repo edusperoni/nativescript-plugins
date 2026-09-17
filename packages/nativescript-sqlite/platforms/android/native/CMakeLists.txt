@@ -3,8 +3,16 @@ set(CMAKE_VERBOSE_MAKEFILE ON)
 
 project(nscsqlite)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+if(NOT DEFINED V8_INCLUDE_DIR OR NOT EXISTS "${V8_INCLUDE_DIR}/v8.h")
+    message(FATAL_ERROR
+        "V8_INCLUDE_DIR must point at the public V8 headers (no v8.h under "
+        "'${V8_INCLUDE_DIR}'). include.gradle downloads them from the release "
+        "pinned in native/v8-headers.properties; pass -Pnscsqlite.v8IncludeDir=<dir> "
+        "to use a local copy instead.")
+endif()
 
 # Optimization options
 option(ENABLE_LTO "Enable cross language linking time optimization" ON)
@@ -20,7 +28,7 @@ if (ENABLE_LTO)
     endif ()
 endif ()
 
-set(COMMON_CMAKE_ARGUMENTS "-std=c++17 -pthread -Werror -v -Wno-unused-result -mstackrealign -fexceptions -fno-builtin-stpcpy -DV8_31BIT_SMIS_ON_64BIT_ARCH")
+set(COMMON_CMAKE_ARGUMENTS "-std=c++20 -pthread -Werror -v -Wno-unused-result -mstackrealign -fexceptions -fno-builtin-stpcpy -DV8_31BIT_SMIS_ON_64BIT_ARCH")
 
 if ("${ANDROID_ABI}" MATCHES "arm64-v8a$" OR "${ANDROID_ABI}" MATCHES "x86_64$")
     set(COMMON_CMAKE_ARGUMENTS "${COMMON_CMAKE_ARGUMENTS} -DV8_COMPRESS_POINTERS")
@@ -67,8 +75,7 @@ endif()
 
 # Include directories
 include_directories(
-    ${PROJECT_SOURCE_DIR}/src/include
-    ${PROJECT_SOURCE_DIR}/src/include/libc++
+    ${V8_INCLUDE_DIR}
 )
 
 # Source files
@@ -88,10 +95,9 @@ add_library(
 
 set_target_properties(
     nscsqlite PROPERTIES
-    CXX_STANDARD 17
+    CXX_STANDARD 20
     CXX_EXTENSIONS OFF
     POSITION_INDEPENDENT_CODE ON
-    LINK_FLAGS -Wl,--allow-multiple-definition
 )
 
 find_library(system-log log)

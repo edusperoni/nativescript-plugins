@@ -13,6 +13,10 @@ namespace NSCSQLite
     namespace DatabaseBinding
     {
 
+        // Type tag for the v8::External holding a DBInstance*; V8 rejects reads
+        // that use a different tag than the one the External was created with.
+        constexpr v8::ExternalPointerTypeTag kDBInstanceTag = 1;
+
         // Each connection is SQLITE_OPEN_NOMUTEX because it is accessed by exactly one
         // thread at a time.  WAL mode (set on the writer) lets readers proceed without
         // blocking writes and writes proceed without blocking readers.
@@ -79,7 +83,9 @@ namespace NSCSQLite
         static DBInstance *GetInstance(const v8::FunctionCallbackInfo<v8::Value> &args, bool async)
         {
             auto field = args.This()->GetInternalField(0);
-            DBInstance *instance = field->IsExternal() ? static_cast<DBInstance *>(field.As<v8::External>()->Value()) : nullptr;
+            DBInstance *instance = (field->IsValue() && field.As<v8::Value>()->IsExternal())
+                                       ? static_cast<DBInstance *>(field.As<v8::External>()->Value(kDBInstanceTag))
+                                       : nullptr;
             if (instance)
                 return instance;
 
@@ -275,7 +281,7 @@ namespace NSCSQLite
             }
 
             DBInstance *raw = instance.release();
-            args.This()->SetInternalField(0, v8::External::New(isolate, raw));
+            args.This()->SetInternalField(0, v8::External::New(isolate, raw, kDBInstanceTag));
             raw->self.Reset(isolate, args.This());
             raw->self.SetWeak(raw, OnGarbageCollected, v8::WeakCallbackType::kParameter);
         }
@@ -288,7 +294,7 @@ namespace NSCSQLite
 
             auto isolate = args.GetIsolate();
 
-            args.This()->SetInternalField(0, v8::External::New(isolate, nullptr));
+            args.This()->SetInternalField(0, v8::External::New(isolate, nullptr, kDBInstanceTag));
 
             // Resolve as a promise
             auto resolver = V8Helpers::NewResolver(isolate);

@@ -18,6 +18,117 @@ def sqliteFlags = project.hasProperty('nscsqlite.sqliteFlags')
                   ? project.property('nscsqlite.sqliteFlags')
                   : ''
 
+def pluginNativeDir = new File(buildscript.sourceFile.parentFile, "native")
+
+def sha256Of(File file) {
+    def digest = java.security.MessageDigest.getInstance("SHA-256")
+    file.withInputStream { input ->
+        byte[] buffer = new byte[65536]
+        int read
+        while ((read = input.read(buffer)) != -1) {
+            digest.update(buffer, 0, read)
+        }
+    }
+    return digest.digest().collect { String.format("%02x", it) }.join()
+}
+
+def downloadV8Headers(String url, File target) {
+    def part = new File(target.parentFile, "${target.name}.${UUID.randomUUID()}.part")
+    part.parentFile.mkdirs()
+
+    def connection = new java.net.URL(url).openConnection()
+    connection.instanceFollowRedirects = true
+    connection.connectTimeout = 30000
+    connection.readTimeout = 300000
+    connection.inputStream.withStream { input ->
+        part.withOutputStream { output -> output << input }
+    }
+
+    java.nio.file.Files.move(part.toPath(), target.toPath(),
+        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+}
+
+// Resolves the public V8 headers the plugin compiles against.  They are not
+// vendored: the version must track the V8 embedded in @nativescript/android,
+// pinned in native/v8-headers.properties.
+//
+// Runs at configuration time because the resolved path has to be part of the
+// app's externalNativeBuild CMake arguments, which are read while the variant
+// is configured.  Everything after the first build is a single file-exists
+// check.
+def resolveV8IncludeDir(project, File nativeDir) {
+    if (project.hasProperty('nscsqlite.v8IncludeDir')) {
+        def userDir = new File(project.property('nscsqlite.v8IncludeDir').toString())
+        if (!new File(userDir, "v8.h").exists()) {
+            throw new GradleException(
+                "nscsqlite.v8IncludeDir=${userDir} does not contain v8.h")
+        }
+        return userDir
+    }
+
+    def props = new Properties()
+    def propsFile = new File(nativeDir, "v8-headers.properties")
+    propsFile.withInputStream { props.load(it) }
+    def release = props.getProperty('release')
+    def asset = props.getProperty('asset')
+    def expectedSha = props.getProperty('sha256')
+    def url = "${props.getProperty('baseUrl')}/${release}/${asset}"
+
+    def cacheRoot = project.hasProperty('nscsqlite.v8HeadersCacheDir')
+                    ? new File(project.property('nscsqlite.v8HeadersCacheDir').toString())
+                    : new File(project.gradle.gradleUserHomeDir, "nscsqlite/v8-headers")
+
+    def releaseDir = new File(cacheRoot, release)
+    def includeDir = new File(releaseDir, "include")
+    if (new File(includeDir, "v8.h").exists()) {
+        return includeDir
+    }
+
+    def archive = new File(cacheRoot, asset)
+    if (!archive.exists() || sha256Of(archive) != expectedSha) {
+        project.logger.lifecycle("[nscsqlite] Downloading V8 headers ${release}")
+        downloadV8Headers(url, archive)
+    }
+
+    def actualSha = sha256Of(archive)
+    if (actualSha != expectedSha) {
+        archive.delete()
+        throw new GradleException(
+            "V8 header archive ${asset} failed checksum verification " +
+            "(expected ${expectedSha}, got ${actualSha}); the download was discarded")
+    }
+
+    // Extract to a private directory and move it into place, so a killed build
+    // can never leave a half-populated cache entry behind.
+    def stagingDir = new File(cacheRoot, "${release}.tmp-${UUID.randomUUID()}")
+    project.copy {
+        from(project.tarTree(project.resources.gzip(archive))) {
+            include '*/include/**'
+            includeEmptyDirs = false
+            eachFile { details ->
+                details.relativePath = new org.gradle.api.file.RelativePath(
+                    true, details.relativePath.segments.drop(1) as String[])
+            }
+        }
+        into stagingDir
+    }
+
+    project.delete(releaseDir)
+    try {
+        java.nio.file.Files.move(stagingDir.toPath(), releaseDir.toPath())
+    } catch (java.io.IOException e) {
+        project.delete(stagingDir)
+        if (!new File(includeDir, "v8.h").exists()) {
+            throw new GradleException(
+                "Failed to populate the V8 header cache at ${releaseDir}", e)
+        }
+    }
+
+    return includeDir
+}
+
+def v8IncludeDir = resolveV8IncludeDir(project, pluginNativeDir)
+
 def findNsAndroidDir(project) {
     def dir = project.rootProject.projectDir
     while (dir != null) {
@@ -31,8 +142,15 @@ def findNsAndroidDir(project) {
 def nsStubsDir = null
 def nsAndroidDir = findNsAndroidDir(project)
 if (nsAndroidDir) {
-    def aarFile = new File(nsAndroidDir, "framework/app/libs/runtime-libs/nativescript-regular.aar")
-    if (aarFile.exists()) {
+    // Any runtime flavor exports the public V8 API, and the stub is only ever a
+    // link-time input, so prefer the smallest one that is present.
+    def runtimeLibsDir = new File(nsAndroidDir, "framework/app/libs/runtime-libs")
+    def aarFile = ['nativescript-optimized.aar',
+                   'nativescript-optimized-with-inspector.aar',
+                   'nativescript-regular.aar']
+        .collect { new File(runtimeLibsDir, it) }
+        .find { it.exists() }
+    if (aarFile != null) {
         def extractDir = new File(project.buildDir, "ns-stubs")
         def abis = ['arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64']
         def allExist = abis.every { abi ->
@@ -61,6 +179,7 @@ if (nsAndroidDir) {
 }
 
 def cmakeArgs = [
+    "-DV8_INCLUDE_DIR=${v8IncludeDir.absolutePath}",
     "-DMYLIB_SQLITE_IMPL=${sqliteImpl}",
     "-DMYLIB_SQLITE_INCLUDE_DIR=${sqliteIncludeDir}",
     "-DMYLIB_SQLITE_LIB_DIR=${sqliteLibDir}",
