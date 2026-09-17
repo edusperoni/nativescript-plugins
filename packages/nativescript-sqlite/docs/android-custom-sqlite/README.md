@@ -14,7 +14,7 @@ in the main README for the contract these all implement.
 | [`sqlcipher-libtomcrypt`](sqlcipher-libtomcrypt) | Real SQLCipher, statically linked, no OpenSSL. For apps that need SQLCipher's own pragmas. |
 | [`prebuilt-imported`](prebuilt-imported) | Link a `.so` someone else compiled. Fewest lines, most caveats. |
 | [`shared-engine`](shared-engine) | One SQLite shared with the app's other native code instead of a private static copy. |
-| [`extension-init-hook`](extension-init-hook) | A custom VFS, an `SQLITE_EXTRA_INIT` hook, or a statically linked extension. |
+| [`extension-init-hook`](extension-init-hook) | An `SQLITE_EXTRA_INIT` hook or a statically linked extension. |
 
 The two built-in presets are instances of the same contract and are the
 shortest reference examples of all:

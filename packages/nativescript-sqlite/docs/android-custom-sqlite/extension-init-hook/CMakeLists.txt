@@ -2,9 +2,6 @@
 # SQLite3MultipleCiphers plus a statically linked extension registered from an
 # SQLITE_EXTRA_INIT hook.
 #
-# The same shape works for a custom VFS: register it from the hook instead of,
-# or as well as, calling sqlite3_auto_extension().
-#
 # Layout this file expects:
 #   App_Resources/Android/nscsqlite/
 #     CMakeLists.txt                       <- this file

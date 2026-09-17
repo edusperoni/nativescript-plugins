@@ -1,6 +1,6 @@
-# Example: a custom VFS, init hook, or statically linked extension
+# Example: an init hook or statically linked extension
 
-Anything that has to exist before the first connection is opened — a VFS, a
+Anything that has to exist before the first connection is opened — a
 statically linked extension, an auto-extension registration — goes through
 SQLite's `SQLITE_EXTRA_INIT` hook. SQLite calls it once, from inside
 `sqlite3_initialize()`.

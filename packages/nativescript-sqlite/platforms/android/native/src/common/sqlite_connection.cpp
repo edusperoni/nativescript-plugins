@@ -33,8 +33,8 @@ constexpr const char* kThreadUnsafeMessage =
 
 #ifdef NSCSQLITE_ENGINE_HAS_NO_CODEC
 // Only the plugin's own codec-less preset defines this. An app-supplied engine
-// never does, because encryption there may live in a VFS with no codec symbols
-// to detect.
+// never does, because it may encrypt without exporting any codec symbols to
+// detect.
 constexpr const char* kNoCodecMessage =
     "this build uses the bundled SQLite, which cannot encrypt; select "
     "nscsqlite.sqlite=sqlite3mc or provide your own SQLite";

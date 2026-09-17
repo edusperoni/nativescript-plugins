@@ -5,7 +5,7 @@ own private copy. That is the right answer for almost every app.
 
 Build the engine as a shared library instead when the app has **other** native
 code that must talk to the same SQLite — the same page cache, the same
-registered VFSes and functions, the same `sqlite3_auto_extension` list. Two
+registered functions, the same `sqlite3_auto_extension` list. Two
 static copies in one process are two independent engines that merely happen to
 open the same files.
 

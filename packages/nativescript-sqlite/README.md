@@ -733,7 +733,7 @@ Whichever route you take, the build log line beginning `nscsqlite: backend=… s
 
 ### Bringing your own SQLite
 
-The presets cover the common cases. When they do not — real SQLCipher, a custom VFS, a statically linked extension, an engine shared with your own native code, a prebuilt `.so` — the app supplies a CMake directory and the plugin builds against whatever comes out of it.
+The presets cover the common cases. When they do not — real SQLCipher, a statically linked extension, an engine shared with your own native code, a prebuilt `.so` — the app supplies a CMake directory and the plugin builds against whatever comes out of it.
 
 #### Where the directory goes
 
@@ -774,7 +774,7 @@ Both built-in presets are implemented as instances of this same contract, which 
 
 **Whether encryption is actually available.** There is no correct test for it in the general case.
 
-"Refuse if `sqlite3_key` is missing" rejects working setups: an engine can answer `PRAGMA key` from a custom VFS that does its own encryption and exports no codec symbols at all. `PRAGMA cipher_version` is SQLCipher-specific — SQLite3MC does not implement it, and neither does such a VFS. Anything the plugin could check would be a guess about which engine you chose, which is exactly the decision it just handed to you.
+"Refuse if `sqlite3_key` is missing" rejects working setups: an engine can implement `PRAGMA key` without exporting any codec symbols at all. `PRAGMA cipher_version` is SQLCipher-specific — SQLite3MC does not implement it, and other engines need not either. Anything the plugin could check would be a guess about which engine you chose, which is exactly the decision it just handed to you.
 
 The one exception is the `bundled` preset, where the plugin compiled the engine itself and therefore *knows* there is no codec; a keyed open on that build is refused. That knowledge does not extend to an engine you supplied. So for an app-provided directory the plugin applies the key and gets out of the way, and asserting that a codec is present is your job — [Encryption Caveats](#encryption-caveats) gives you an engine-independent probe and an `onOpen` assertion.
 
@@ -797,7 +797,7 @@ Five complete `CMakeLists.txt` files, each with a page on what it does and what 
 | [SQLCipher with LibTomCrypt](docs/android-custom-sqlite/sqlcipher-libtomcrypt) | Real SQLCipher — its pragmas, its migrations — statically linked, no OpenSSL, no Prefab. |
 | [a prebuilt `.so` as an IMPORTED target](docs/android-custom-sqlite/prebuilt-imported) | Link a library someone else compiled — and take on what the plugin can no longer do for you. |
 | [a SHARED engine shared with other native code](docs/android-custom-sqlite/shared-engine) | One SQLite in the process instead of a private static copy. |
-| [a custom VFS, init hook, or statically linked extension](docs/android-custom-sqlite/extension-init-hook) | The `SQLITE_EXTRA_INIT` chaining-shim pattern. |
+| [an init hook or statically linked extension](docs/android-custom-sqlite/extension-init-hook) | The `SQLITE_EXTRA_INIT` chaining-shim pattern. |
 
 One thing to know before reaching for the last one: the plugin does **not** expose a raw `SQLITE_EXTRA_INIT` pass-through for the built-in presets, and that is on purpose. SQLCipher's guard is `#if !defined(SQLITE_EXTRA_INIT)` — it tests that the macro *exists*, not what it names — so a user-supplied value silently displaces `sqlcipher_extra_init`, the build succeeds, and the crypto provider is never registered. Statically linked extensions for the built-in presets are out of scope for this release; they go through the app-provided directory.
 
@@ -886,13 +886,13 @@ Possible on any engine the plugin did not compile itself — the `sqlite3mc` pre
 
 Exactly one case: **Android's `bundled` preset**. The plugin compiled that engine, so it knows there is no codec in it, and a keyed `openDatabase()` on such a build throws instead of writing plaintext.
 
-That is the limit of what it can know. For the `sqlite3mc` preset, for any engine you supply through the app-provided directory, and for **every iOS configuration** — where the SQLite comes from your Podfile and the plugin never sees how it was built — it cannot tell a missing codec from one living inside a custom VFS. Refusing on a missing `sqlite3_key` symbol would reject working setups; `PRAGMA cipher_version` is SQLCipher-specific. See [What the plugin deliberately does not check](#what-the-plugin-deliberately-does-not-check).
+That is the limit of what it can know. For the `sqlite3mc` preset, for any engine you supply through the app-provided directory, and for **every iOS configuration** — where the SQLite comes from your Podfile and the plugin never sees how it was built — it cannot tell a missing codec from encryption the engine implements some other way. Refusing on a missing `sqlite3_key` symbol would reject working setups; `PRAGMA cipher_version` is SQLCipher-specific. See [What the plugin deliberately does not check](#what-the-plugin-deliberately-does-not-check).
 
 **So: if you bring your own engine, asserting that it actually encrypts is your job.** Two ways to do it.
 
 ### The engine-independent proof
 
-Create a throwaway database with a key, close it, and reopen it **without** the key. If that succeeds, there is no encryption. This works on any engine — a codec, a VFS that encrypts itself, or nothing at all — because it tests the file rather than the API:
+Create a throwaway database with a key, close it, and reopen it **without** the key. If that succeeds, there is no encryption. This works on any engine, whatever it uses to encrypt or whether it encrypts at all, because it tests the file rather than the API:
 
 ```typescript
 import { openDatabase } from '@edusperoni/nativescript-sqlite';
@@ -972,7 +972,7 @@ There is still no engine-independent version, because each engine exposes someth
 |---|---|---|
 | SQLCipher | `PRAGMA cipher_version`, `PRAGMA cipher_migrate`, the `sqlcipher_export()` SQL function | `sqlite3mc_version()` |
 | `sqlite3mc` preset | `PRAGMA cipher` (returns `sqlcipher`), `PRAGMA legacy`, the `sqlite3mc_version()` SQL function | every `cipher_*` pragma above, silently |
-| a custom VFS with its own crypto | whatever that VFS defines | both of the above |
+| an engine with its own encryption | whatever that engine defines | both of the above |
 | plain SQLite | nothing at all | both of the above — and `PRAGMA key` still returns OK |
 
 A pragma alone cannot carry either assertion: SQLite ignores an unknown one rather than failing, so `PRAGMA cipher_version` on plain SQLite returns no rows and `onOpen` sees a statement that ran fine. That is why both examples reference a **function** instead — a name the wrong engine cannot resolve is a prepare-time error, and `onOpen` turns it into a failed open.
