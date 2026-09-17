@@ -1,4 +1,4 @@
-import { DatabaseOptions, RuntimeInfo, SQLITE_ERROR, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, isInMemoryPath, resolveEncryptionKey } from './common';
+import { DatabaseOptions, RuntimeInfo, SQLITE_ERROR, SQLITE_MISUSE, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, isInMemoryPath, resolveEncryptionKey } from './common';
 import type { PreparedStatement, ReadTransaction, SQLiteDatabase, Transaction } from '.';
 
 export { DatabaseOptions, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, RuntimeInfo };
@@ -6,8 +6,10 @@ export type { PreparedStatement, ReadTransaction, SQLiteDatabase, Transaction };
 export * from './common';
 
 declare class NSSQLiteDatabase extends NSObject {
-	/** Throws an NSSQLiteOpenError NSException carrying the SQLite code in userInfo. */
-	static openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeyOnOpenSerialized(path: string, poolSize: number, readOnly: boolean, busyTimeout: number, encryptionKey: string | null, onOpen: string[], serialized: boolean): NSSQLiteDatabase;
+	/** Returns null with `error` set when the writer cannot be opened, unless asyncOpen is true. */
+	static openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeyOnOpenSerializedAsyncOpenError(path: string, poolSize: number, readOnly: boolean, busyTimeout: number, encryptionKey: string | null, onOpen: string[], serialized: boolean, asyncOpen: boolean, error: interop.Reference<NSError>): NSSQLiteDatabase;
+
+	initializedWithCompletion(completion: (error: NSError) => void): void;
 
 	executeParamsCompletion(sql: string, params: NSArray<any>, completion: (error: NSError) => void): void;
 	selectParamsCompletion(sql: string, params: NSArray<any>, completion: (json: string, blobs: NSArray<NSData>, error: NSError) => void): void;
@@ -31,9 +33,16 @@ declare class NSSQLiteDatabase extends NSObject {
 	selectArrayPreparedParamsCompletion(stmtId: number, params: NSArray<any>, completion: (json: string, blobs: NSArray<NSData>, error: NSError) => void): void;
 	finalizePreparedCompletion(stmtId: number, completion: (error: NSError) => void): void;
 
-	executeSyncParamsError(sql: string, params: NSArray<any>): boolean;
-	selectSyncParamsError(sql: string, params: NSArray<any>): string;
-	selectArraySyncParamsError(sql: string, params: NSArray<any>): string;
+	executeSyncParamsJoinTransactionError(sql: string, params: NSArray<any>, joinTransaction: boolean, error: interop.Reference<NSError>): boolean;
+	selectSyncParamsBlobsError(sql: string, params: NSArray<any>, blobs: interop.Reference<NSArray<NSData>>, error: interop.Reference<NSError>): string;
+	selectArraySyncParamsBlobsError(sql: string, params: NSArray<any>, blobs: interop.Reference<NSArray<NSData>>, error: interop.Reference<NSError>): string;
+
+	executeInTransactionSyncSqlParamsError(txId: number, sql: string, params: NSArray<any>, error: interop.Reference<NSError>): boolean;
+	selectInTransactionSyncSqlParamsBlobsError(txId: number, sql: string, params: NSArray<any>, blobs: interop.Reference<NSArray<NSData>>, error: interop.Reference<NSError>): string;
+	selectArrayInTransactionSyncSqlParamsBlobsError(txId: number, sql: string, params: NSArray<any>, blobs: interop.Reference<NSArray<NSData>>, error: interop.Reference<NSError>): string;
+
+	beginTransactionSyncError(behavior: string, error: interop.Reference<NSError>): number;
+	endTransactionSyncCommitError(txId: number, commit: boolean, error: interop.Reference<NSError>): boolean;
 
 	runtimeInfo(): NSDictionary<string, any>;
 
@@ -47,16 +56,38 @@ function toNSError(error: NSError): SQLiteError {
 	return new SQLiteError(error.localizedDescription, error.code, extCode ?? error.code);
 }
 
-/**
- * The native open raises an NSException rather than returning an error, so the
- * SQLite result code arrives on the JS error as `nativeException.userInfo`.
- */
-function toOpenError(e: any, path: string): SQLiteError {
-	const userInfo = e?.nativeException?.userInfo;
-	const code = (userInfo?.objectForKey?.('code') as number) ?? SQLITE_ERROR;
-	const extCode = (userInfo?.objectForKey?.('extendedCode') as number) ?? code;
-	const message = e?.nativeException?.reason ?? e?.message;
-	return new SQLiteError(message ? `Failed to open database "${path}": ${message}` : `Failed to open database: ${path}`, code, extCode);
+function openErrorMessage(path: string, reason?: string): string {
+	return reason ? `Failed to open database "${path}": ${reason}` : `Failed to open database: ${path}`;
+}
+
+/** Both open routes — `openDatabase()` and `initialized()` — report through this. */
+function toOpenError(error: NSError, path: string): SQLiteError {
+	const extCode = error.userInfo?.objectForKey?.('extendedCode') as number | undefined;
+	return new SQLiteError(openErrorMessage(path, error.localizedDescription), error.code, extCode ?? error.code);
+}
+
+/** The sync entry points report failure through a trailing NSError out-parameter. */
+function syncError(ref: interop.Reference<NSError>, fallback: string): SQLiteError {
+	const error = ref.value;
+	return error ? toNSError(error) : new SQLiteError(fallback, SQLITE_ERROR);
+}
+
+type SyncSelectCall = (blobs: interop.Reference<NSArray<NSData>>, error: interop.Reference<NSError>) => string;
+
+function runSelectSync<T>(call: SyncSelectCall): T[] {
+	const blobs = new interop.Reference<NSArray<NSData>>();
+	const error = new interop.Reference<NSError>();
+	const json = call(blobs, error);
+	if (!json) throw syncError(error, 'selectSync failed');
+	return parseSelectResult<T[]>(json, blobs.value ?? null);
+}
+
+function runSelectArraySync<T extends SQLiteValue[]>(call: SyncSelectCall): SQLiteArrayResult<T> {
+	const blobs = new interop.Reference<NSArray<NSData>>();
+	const error = new interop.Reference<NSError>();
+	const json = call(blobs, error);
+	if (!json) throw syncError(error, 'selectArraySync failed');
+	return parseArrayResult<T>(json, blobs.value ?? null);
 }
 
 function marshalParams(params?: SQLiteParams): NSArray<any> {
@@ -129,12 +160,52 @@ function parseArrayResult<T extends SQLiteValue[]>(json: string, blobs: NSArray<
 	return result;
 }
 
-class WriteTxImpl implements Transaction {
+/**
+ * The synchronous reads every transaction object offers. They run on the
+ * connection that owns the transaction, so they see its uncommitted rows and
+ * never trip the SQLITE_BUSY safeguard `db.executeSync` applies.
+ */
+class TxSyncReads {
 	constructor(
-		private native: NSSQLiteDatabase,
-		private txId: number,
-		private _savepointCounter: { value: number },
+		protected native: NSSQLiteDatabase,
+		protected txId: number,
 	) {}
+
+	selectSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T[] {
+		return runSelectSync<T>((blobs, error) => this.native.selectInTransactionSyncSqlParamsBlobsError(this.txId, sql, marshalParams(params), blobs, error));
+	}
+
+	selectArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T> {
+		return runSelectArraySync<T>((blobs, error) => this.native.selectArrayInTransactionSyncSqlParamsBlobsError(this.txId, sql, marshalParams(params), blobs, error));
+	}
+
+	getSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T | undefined {
+		return this.selectSync<T>(sql, params)[0];
+	}
+
+	getArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T> {
+		const result = this.selectArraySync<T>(sql, params);
+		return { columns: result.columns, rows: result.rows.slice(0, 1) };
+	}
+}
+
+class TxSyncStatements extends TxSyncReads {
+	executeSync(sql: string, params?: SQLiteParams): void {
+		const error = new interop.Reference<NSError>();
+		if (!this.native.executeInTransactionSyncSqlParamsError(this.txId, sql, marshalParams(params), error)) {
+			throw syncError(error, 'executeSync failed');
+		}
+	}
+}
+
+class WriteTxImpl extends TxSyncStatements implements Transaction {
+	constructor(
+		native: NSSQLiteDatabase,
+		txId: number,
+		private _savepointCounter: { value: number },
+	) {
+		super(native, txId);
+	}
 
 	execute(sql: string, params?: SQLiteParams): Promise<void> {
 		return new Promise((resolve, reject) => {
@@ -194,12 +265,31 @@ class WriteTxImpl implements Transaction {
 	}
 }
 
-class ReadTxImpl implements ReadTransaction {
+/** The transaction object `transactionSync` hands to its callback. */
+class SyncTxImpl extends TxSyncStatements {
 	constructor(
-		private native: NSSQLiteDatabase,
-		private txId: number,
-	) {}
+		native: NSSQLiteDatabase,
+		txId: number,
+		private _savepointCounter: { value: number },
+	) {
+		super(native, txId);
+	}
 
+	savepointSync<T>(fn: (tx: SyncTxImpl) => T): T {
+		const name = `sp_${this._savepointCounter.value++}`;
+		this.executeSync(`SAVEPOINT ${name}`);
+		try {
+			const result = fn(this);
+			this.executeSync(`RELEASE ${name}`);
+			return result;
+		} catch (e) {
+			this.executeSync(`ROLLBACK TO ${name}`);
+			throw e;
+		}
+	}
+}
+
+class ReadTxImpl extends TxSyncReads implements ReadTransaction {
 	select<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T[]> {
 		return new Promise((resolve, reject) => {
 			this.native.selectInReadTransactionSqlParamsCompletion(this.txId, sql, marshalParams(params), (json, blobs, error) => {
@@ -297,10 +387,26 @@ class PreparedStatementImpl implements PreparedStatement {
 }
 
 class SQLiteDatabaseImpl implements SQLiteDatabase {
-	constructor(private native: NSSQLiteDatabase) {}
+	constructor(
+		private native: NSSQLiteDatabase,
+		private path: string,
+	) {}
 
 	get isOpen(): boolean {
 		return this.native.isOpen;
+	}
+
+	/** A fresh promise per call, so a rejection nobody observes is never created. */
+	initialized(): Promise<void> {
+		return new Promise<void>((resolve, reject) => {
+			this.native.initializedWithCompletion((error) => {
+				if (error) {
+					reject(toOpenError(error, this.path));
+				} else {
+					resolve();
+				}
+			});
+		});
 	}
 
 	execute(sql: string, params?: SQLiteParams): Promise<void> {
@@ -417,27 +523,19 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 		});
 	}
 
-	executeSync(sql: string, params?: SQLiteParams): void {
-		const ok = this.native.executeSyncParamsError(sql, marshalParams(params));
-		if (!ok) {
-			throw new SQLiteError('executeSync failed', -1);
+	executeSync(sql: string, params?: SQLiteParams, options?: { joinTransaction?: boolean }): void {
+		const error = new interop.Reference<NSError>();
+		if (!this.native.executeSyncParamsJoinTransactionError(sql, marshalParams(params), options?.joinTransaction ?? false, error)) {
+			throw syncError(error, 'executeSync failed');
 		}
 	}
 
 	selectSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T[] {
-		const json = this.native.selectSyncParamsError(sql, marshalParams(params));
-		if (!json) {
-			throw new SQLiteError('selectSync failed', -1);
-		}
-		return JSON.parse(json);
+		return runSelectSync<T>((blobs, error) => this.native.selectSyncParamsBlobsError(sql, marshalParams(params), blobs, error));
 	}
 
 	selectArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T> {
-		const json = this.native.selectArraySyncParamsError(sql, marshalParams(params));
-		if (!json) {
-			throw new SQLiteError('selectArraySync failed', -1);
-		}
-		return JSON.parse(json);
+		return runSelectArraySync<T>((blobs, error) => this.native.selectArraySyncParamsBlobsError(sql, marshalParams(params), blobs, error));
 	}
 
 	getSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T | undefined {
@@ -445,7 +543,54 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 	}
 
 	getArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T> {
-		return this.selectArraySync<T>(sql, params);
+		const result = this.selectArraySync<T>(sql, params);
+		return { columns: result.columns, rows: result.rows.slice(0, 1) };
+	}
+
+	transactionSync<T>(fn: (tx: SyncTxImpl) => T): T {
+		const beginError = new interop.Reference<NSError>();
+		const txId = this.native.beginTransactionSyncError('deferred', beginError);
+		if (txId < 0) {
+			throw syncError(beginError, 'beginTransactionSync failed');
+		}
+
+		const tx = new SyncTxImpl(this.native, txId, { value: 0 });
+		let result: T;
+		try {
+			result = fn(tx);
+			// Nothing can be awaited inside the span, so a promise here would be
+			// committed before the work it stands for had run.
+			if (result && typeof (result as unknown as Promise<T>).then === 'function') {
+				throw new SQLiteError('transactionSync requires a synchronous callback, but it returned a promise; use transaction() instead', SQLITE_MISUSE);
+			}
+		} catch (e) {
+			this._endTransactionSync(txId, false);
+			throw e;
+		}
+		this._endTransactionSync(txId, true);
+		return result;
+	}
+
+	private _endTransactionSync(txId: number, commit: boolean): void {
+		const error = new interop.Reference<NSError>();
+		if (!this.native.endTransactionSyncCommitError(txId, commit, error) && commit) {
+			throw syncError(error, 'commit failed');
+		}
+	}
+
+	executeInTransactionSync(txId: number, sql: string, params?: SQLiteParams): void {
+		const error = new interop.Reference<NSError>();
+		if (!this.native.executeInTransactionSyncSqlParamsError(txId, sql, marshalParams(params), error)) {
+			throw syncError(error, 'executeInTransactionSync failed');
+		}
+	}
+
+	selectInTransactionSync(txId: number, sql: string, params?: SQLiteParams): SQLiteRow[] {
+		return runSelectSync<SQLiteRow>((blobs, error) => this.native.selectInTransactionSyncSqlParamsBlobsError(txId, sql, marshalParams(params), blobs, error));
+	}
+
+	selectArrayInTransactionSync(txId: number, sql: string, params?: SQLiteParams): SQLiteArrayResult {
+		return runSelectArraySync<SQLiteValue[]>((blobs, error) => this.native.selectArrayInTransactionSyncSqlParamsBlobsError(txId, sql, marshalParams(params), blobs, error));
 	}
 
 	// Low-level transaction control for driver integrations
@@ -511,8 +656,14 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 	}
 
 	rollbackTransaction(txId: number): Promise<void> {
-		return new Promise((resolve) => {
-			this.native.rollbackTransactionCompletion(txId, () => resolve());
+		return new Promise((resolve, reject) => {
+			this.native.rollbackTransactionCompletion(txId, (error) => {
+				if (error) {
+					reject(toNSError(error));
+				} else {
+					resolve();
+				}
+			});
 		});
 	}
 
@@ -541,14 +692,11 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 
 export function openDatabase(options: DatabaseOptions): SQLiteDatabase {
 	const serialized = options.serialized ?? isInMemoryPath(options.path);
-	let native: NSSQLiteDatabase;
-	try {
-		native = NSSQLiteDatabase.openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeyOnOpenSerialized(options.path, options.poolSize ?? 4, options.readOnly ?? false, options.busyTimeout ?? 5000, resolveEncryptionKey(options), options.onOpen ?? [], serialized);
-	} catch (e) {
-		throw toOpenError(e, options.path);
-	}
+	const error = new interop.Reference<NSError>();
+	const native = NSSQLiteDatabase.openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeyOnOpenSerializedAsyncOpenError(options.path, options.poolSize ?? 4, options.readOnly ?? false, options.busyTimeout ?? 5000, resolveEncryptionKey(options), options.onOpen ?? [], serialized, options.asyncOpen ?? false, error);
 	if (!native) {
-		throw new SQLiteError(`Failed to open database: ${options.path}`, SQLITE_ERROR);
+		const failure = error.value;
+		throw failure ? toOpenError(failure, options.path) : new SQLiteError(openErrorMessage(options.path), SQLITE_ERROR);
 	}
-	return new SQLiteDatabaseImpl(native);
+	return new SQLiteDatabaseImpl(native, options.path);
 }
