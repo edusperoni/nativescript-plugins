@@ -80,29 +80,6 @@ function rewrapNativeError(e: unknown): never {
 	throw e;
 }
 
-// Transparent proxy around the raw native object that catches errors from every
-// method call (both sync throws and promise rejections) and rewraps them.
-function makeNativeProxy(native: any): any {
-	return new Proxy(native, {
-		get(target, prop) {
-			const val = target[prop];
-			if (typeof val !== 'function') return val;
-			return function (...args: any[]) {
-				let result: any;
-				try {
-					result = val.apply(target, args);
-				} catch (e) {
-					rewrapNativeError(e);
-				}
-				if (result != null && typeof result.then === 'function') {
-					return result.catch(rewrapNativeError);
-				}
-				return result;
-			};
-		},
-	});
-}
-
 class PreparedStatementImpl implements PreparedStatement {
 	constructor(
 		private _db: any,
@@ -110,27 +87,51 @@ class PreparedStatementImpl implements PreparedStatement {
 	) {}
 
 	async execute(params?: SQLiteParams): Promise<void> {
-		await this._db.stepStatement(this._stmtId, params, 0);
+		try {
+			await this._db.stepStatement(this._stmtId, params, 0);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async select<T extends SQLiteRow = SQLiteRow>(params?: SQLiteParams): Promise<T[]> {
-		return await this._db.stepStatement(this._stmtId, params, 1);
+		try {
+			return await this._db.stepStatement(this._stmtId, params, 1);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async selectArray<T extends SQLiteValue[] = SQLiteValue[]>(params?: SQLiteParams): Promise<SQLiteArrayResult<T>> {
-		return await this._db.stepStatement(this._stmtId, params, 2);
+		try {
+			return await this._db.stepStatement(this._stmtId, params, 2);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async get<T extends SQLiteRow = SQLiteRow>(params?: SQLiteParams): Promise<T | undefined> {
-		return await this._db.stepStatement(this._stmtId, params, 3);
+		try {
+			return await this._db.stepStatement(this._stmtId, params, 3);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async getArray<T extends SQLiteValue[] = SQLiteValue[]>(params?: SQLiteParams): Promise<SQLiteArrayResult<T>> {
-		return await this._db.stepStatement(this._stmtId, params, 4);
+		try {
+			return await this._db.stepStatement(this._stmtId, params, 4);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async finalize(): Promise<void> {
-		await this._db.finalizeStatement(this._stmtId);
+		try {
+			await this._db.finalizeStatement(this._stmtId);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 }
 
@@ -141,20 +142,28 @@ class ReadTransactionImpl implements ReadTransaction {
 	) {}
 
 	async select<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T[]> {
-		return await this._db.selectInTransaction(this._txId, sql, params, 1);
+		try {
+			return await this._db.selectInTransaction(this._txId, sql, params, 1);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async selectArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>> {
-		return await this._db.selectInTransaction(this._txId, sql, params, 2);
+		try {
+			return await this._db.selectInTransaction(this._txId, sql, params, 2);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async get<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T | undefined> {
-		const res = await this._db.selectInTransaction(this._txId, sql, params, 1);
+		const res = await this.select<T>(sql, params);
 		return res && res.length > 0 ? res[0] : undefined;
 	}
 
 	async getArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>> {
-		const res = await this._db.selectInTransaction(this._txId, sql, params, 2);
+		const res = await this.selectArray<T>(sql, params);
 		if (res && res.rows && res.rows.length > 0) {
 			return { columns: res.columns, rows: [res.rows[0]] as any };
 		}
@@ -170,19 +179,23 @@ class TransactionImpl extends ReadTransactionImpl implements Transaction {
 	}
 
 	async execute(sql: string, params?: SQLiteParams): Promise<void> {
-		await this._db.executeInTransaction(this._txId, sql, params);
+		try {
+			await this._db.executeInTransaction(this._txId, sql, params);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async savepoint<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> {
 		const name = `_sp${TransactionImpl._savepointSeq++}`;
-		await this._db.executeInTransaction(this._txId, `SAVEPOINT ${name}`);
+		await this.execute(`SAVEPOINT ${name}`);
 		try {
 			const result = await fn(this);
-			await this._db.executeInTransaction(this._txId, `RELEASE SAVEPOINT ${name}`);
+			await this.execute(`RELEASE SAVEPOINT ${name}`);
 			return result;
 		} catch (e) {
-			await this._db.executeInTransaction(this._txId, `ROLLBACK TO SAVEPOINT ${name}`);
-			await this._db.executeInTransaction(this._txId, `RELEASE SAVEPOINT ${name}`);
+			await this.execute(`ROLLBACK TO SAVEPOINT ${name}`);
+			await this.execute(`RELEASE SAVEPOINT ${name}`);
 			throw e;
 		}
 	}
@@ -202,7 +215,7 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 			const uid = `_nscmem_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 			options = { ...options, path: `file:${uid}?mode=memory&cache=shared` };
 		}
-		this._db = makeNativeProxy(new NSCSQLite(options.path, options));
+		this._db = new NSCSQLite(options.path, options);
 		this._isOpen = true;
 	}
 
@@ -211,23 +224,43 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 	}
 
 	async execute(sql: string, params?: SQLiteParams): Promise<void> {
-		await this._db.execute(sql, params);
+		try {
+			await this._db.execute(sql, params);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async select<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T[]> {
-		return await this._db.select(sql, params);
+		try {
+			return await this._db.select(sql, params);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async selectArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>> {
-		return await this._db.selectArray(sql, params);
+		try {
+			return await this._db.selectArray(sql, params);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async get<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T | undefined> {
-		return await this._db.get(sql, params);
+		try {
+			return await this._db.get(sql, params);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async getArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>> {
-		return await this._db.getArray(sql, params);
+		try {
+			return await this._db.getArray(sql, params);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async transaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> {
@@ -257,61 +290,118 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 	}
 
 	async prepare(sql: string): Promise<PreparedStatement> {
-		const stmtId = await this._db.prepare(sql);
+		let stmtId: number;
+		try {
+			stmtId = await this._db.prepare(sql);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 		return new PreparedStatementImpl(this._db, stmtId);
 	}
 
 	executeSync(sql: string, params?: SQLiteParams): void {
-		this._db.executeSync(sql, params);
+		try {
+			this._db.executeSync(sql, params);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	selectSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T[] {
-		return this._db.selectSync(sql, params);
+		try {
+			return this._db.selectSync(sql, params);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	selectArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T> {
-		return this._db.selectArraySync(sql, params);
+		try {
+			return this._db.selectArraySync(sql, params);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	getSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T | undefined {
-		return this._db.getSync(sql, params);
+		try {
+			return this._db.getSync(sql, params);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	getArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T> {
-		return this._db.getArraySync(sql, params);
+		try {
+			return this._db.getArraySync(sql, params);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async beginTransaction(behavior?: 'deferred' | 'immediate' | 'exclusive'): Promise<number> {
-		return await this._db.beginTransaction(behavior);
+		try {
+			return await this._db.beginTransaction(behavior);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async executeInTransaction(txId: number, sql: string, params?: SQLiteParams): Promise<void> {
-		await this._db.executeInTransaction(txId, sql, params);
+		try {
+			await this._db.executeInTransaction(txId, sql, params);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async selectInTransaction(txId: number, sql: string, params?: SQLiteParams): Promise<SQLiteRow[]> {
-		return await this._db.selectInTransaction(txId, sql, params, 1);
+		try {
+			return await this._db.selectInTransaction(txId, sql, params, 1);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async selectArrayInTransaction(txId: number, sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult> {
-		return await this._db.selectInTransaction(txId, sql, params, 2);
+		try {
+			return await this._db.selectInTransaction(txId, sql, params, 2);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async commitTransaction(txId: number): Promise<void> {
-		await this._db.commitTransaction(txId);
+		try {
+			await this._db.commitTransaction(txId);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async rollbackTransaction(txId: number): Promise<void> {
-		await this._db.rollbackTransaction(txId);
+		try {
+			await this._db.rollbackTransaction(txId);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	getRuntimeInfo(): RuntimeInfo {
-		return this._db.getRuntimeInfo();
+		try {
+			return this._db.getRuntimeInfo();
+		} catch (e) {
+			rewrapNativeError(e);
+		}
 	}
 
 	async close(): Promise<void> {
 		if (this._isOpen) {
-			await this._db.close();
+			try {
+				await this._db.close();
+			} catch (e) {
+				rewrapNativeError(e);
+			}
 			this._isOpen = false;
 		}
 	}
