@@ -8,23 +8,54 @@ const BENCH_LAUNCH_FALLBACK_MS = 6000;
 
 type BenchRequest = { mode: 'full' | 'quick'; options: RunBenchmarksOptions } | { mode: 'test'; options: RunCorrectnessTestsOptions } | { mode: 'encwal'; options: RunEncryptedWalOptions };
 
+/** The three values each platform carries, before they are checked. */
+interface BenchArgs {
+	mode: string | null;
+	label?: string;
+	filter?: string;
+}
+
+function readAndroidArgs(): BenchArgs | null {
+	const androidApp = Application.android;
+	const activity = androidApp.foregroundActivity || androidApp.startActivity;
+	const intent = activity && activity.getIntent();
+	if (!intent) return null;
+	return {
+		mode: intent.getStringExtra('nscbench'),
+		label: intent.getStringExtra('nscbenchLabel') || undefined,
+		filter: intent.getStringExtra('nscbenchFilter') || undefined,
+	};
+}
+
+function readIOSArgs(): BenchArgs | null {
+	if (typeof NSProcessInfo === 'undefined') return null;
+	const argv = NSProcessInfo.processInfo.arguments;
+	const flag = (name: string): string | undefined => {
+		for (let i = 0; i + 1 < argv.count; i++) {
+			if (argv.objectAtIndex(i) === name) return argv.objectAtIndex(i + 1) || undefined;
+		}
+		return undefined;
+	};
+	return {
+		mode: flag('-nscbench') ?? null,
+		label: flag('-nscbenchLabel'),
+		filter: flag('-nscbenchFilter'),
+	};
+}
+
 function readBenchRequest(): BenchRequest | null {
 	try {
-		const androidApp = Application.android;
-		if (!androidApp) return null;
-		const activity = androidApp.foregroundActivity || androidApp.startActivity;
-		const intent = activity && activity.getIntent();
-		if (!intent) return null;
-		const mode = intent.getStringExtra('nscbench');
+		const args = Application.android ? readAndroidArgs() : readIOSArgs();
+		if (!args) return null;
+		const mode = args.mode;
 		if (mode !== 'full' && mode !== 'quick' && mode !== 'test' && mode !== 'encwal') return null;
-		const label = intent.getStringExtra('nscbenchLabel') || undefined;
-		if (mode === 'test' || mode === 'encwal') return { mode, options: { label } };
+		if (mode === 'test' || mode === 'encwal') return { mode, options: { label: args.label } };
 		return {
 			mode,
 			options: {
 				quick: mode === 'quick',
-				label,
-				filter: intent.getStringExtra('nscbenchFilter') || undefined,
+				label: args.label,
+				filter: args.filter,
 			},
 		};
 	} catch (err) {
