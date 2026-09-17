@@ -74,16 +74,33 @@ namespace NSCSQLite
             if (instance->syncDb)
                 instance->syncDb->close();
 
-            int total = 1 + static_cast<int>(instance->readerDispatchers.size());
-            auto latch = std::make_shared<std::atomic<int>>(total);
-            auto tick = [instance, persistentResolver, latch]()
+            // SQLite only checkpoints and unlinks the -wal when the closing
+            // connection can take an exclusive lock on the database file, which
+            // it cannot while a sibling connection is still attached. Closing
+            // the readers first leaves the writer alone to do it.
+            auto closeWriter = [instance, persistentResolver]()
             {
-                if (latch->fetch_sub(1, std::memory_order_acq_rel) == 1)
-                {
+                SQLiteConnection *wdb = instance->writerDb.get();
+                instance->writerDispatcher->dispatch([wdb]()
+                                                     { wdb->close(); }, [instance, persistentResolver]()
+                                                     {
                     if (persistentResolver)
                         instance->adapter->resolveVoid(persistentResolver);
-                    delete instance;
-                }
+                    delete instance; });
+            };
+
+            int readers = static_cast<int>(instance->readerDispatchers.size());
+            if (readers == 0)
+            {
+                closeWriter();
+                return;
+            }
+
+            auto latch = std::make_shared<std::atomic<int>>(readers);
+            auto tick = [latch, closeWriter]()
+            {
+                if (latch->fetch_sub(1, std::memory_order_acq_rel) == 1)
+                    closeWriter();
             };
 
             for (size_t i = 0; i < instance->readerDispatchers.size(); ++i)
@@ -92,10 +109,6 @@ namespace NSCSQLite
                 instance->readerDispatchers[i]->dispatch([rdb]()
                                                          { rdb->close(); }, tick);
             }
-
-            SQLiteConnection *wdb = instance->writerDb.get();
-            instance->writerDispatcher->dispatch([wdb]()
-                                                 { wdb->close(); }, tick);
         }
 
         static void OnGarbageCollected(const v8::WeakCallbackInfo<DBInstance> &info)
