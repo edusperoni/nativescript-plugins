@@ -1,6 +1,6 @@
-import { DatabaseOptions, ExecuteSyncOptions, RuntimeInfo, SQLITE_ERROR, SQLITE_MISUSE, SQLiteArrayResult, SQLiteDatabase, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, SyncTransaction, Transaction, ReadTransaction, PreparedStatement, isInMemoryPath, resolveEncryptionKey } from './common';
+import { DatabaseOptions, ExecuteSyncOptions, NativeOpenStep, OpenStep, RuntimeInfo, SQLITE_ERROR, SQLITE_MISUSE, SQLiteArrayResult, SQLiteDatabase, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, SyncTransaction, Transaction, ReadTransaction, PreparedStatement, isInMemoryPath, resolveEncryptionKey, resolveOpenSequence } from './common';
 
-export { DatabaseOptions, ExecuteSyncOptions, RuntimeInfo, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, ReadTransaction, SyncTransaction, Transaction, PreparedStatement, isInMemoryPath, resolveEncryptionKey };
+export { DatabaseOptions, ExecuteSyncOptions, OpenStep, RuntimeInfo, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, ReadTransaction, SyncTransaction, Transaction, PreparedStatement, isInMemoryPath, resolveEncryptionKey, resolveOpenSequence };
 export type { SQLiteDatabase };
 export {
 	SQLITE_OK,
@@ -75,7 +75,7 @@ interface NativeOpenOptions {
 	poolSize: number;
 	busyTimeout: number;
 	encryptionKey: string | null;
-	onOpen: string[];
+	openSequence: NativeOpenStep[];
 	serialized: boolean;
 	asyncOpen: boolean;
 }
@@ -326,7 +326,7 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 			poolSize: options.poolSize ?? 4,
 			busyTimeout: options.busyTimeout ?? 5000,
 			encryptionKey: resolveEncryptionKey(options),
-			onOpen: options.onOpen ?? [],
+			openSequence: resolveOpenSequence(options),
 			serialized,
 			asyncOpen: options.asyncOpen ?? false,
 		};

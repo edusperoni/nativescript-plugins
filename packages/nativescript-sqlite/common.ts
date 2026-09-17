@@ -56,6 +56,109 @@ export interface SQLiteArrayResult<T extends SQLiteValue[] = SQLiteValue[]> {
 	rows: T[];
 }
 
+/** Which connections a step of the open sequence runs on. */
+export type OpenStepScope = 'all' | 'writer' | 'readers';
+
+/**
+ * One step of a connection's open sequence: a SQL statement, a scoped SQL
+ * statement, or one of the two markers saying where the encryption key is
+ * applied and where the journal mode is switched to WAL.
+ *
+ * In `serialized` mode the single connection is the writer, so `'readers'`
+ * steps never run.
+ */
+export type OpenStep = string | { sql: string; on?: OpenStepScope } | { readonly step: 'key' } | { readonly step: 'wal' };
+
+/** The two markers that can appear in an `openSequence`. */
+export const OpenStep = Object.freeze({
+	/** Applies `encryptionKey` to the connection. A no-op when no key is set. */
+	key: Object.freeze({ step: 'key' as const }),
+	/** Switches the writer to WAL. A no-op on a reader, and on a read-only database. */
+	wal: Object.freeze({ step: 'wal' as const }),
+});
+
+/** How a step reaches the native layer: plain data, so it survives onto a background thread. */
+export interface NativeOpenStep {
+	/** 0 = run `sql`, 1 = apply the encryption key, 2 = switch to WAL. */
+	kind: number;
+	/** 0 = every connection, 1 = the writer, 2 = the readers. */
+	scope: number;
+	sql: string;
+}
+
+const STEP_SQL = 0;
+const STEP_KEY = 1;
+const STEP_WAL = 2;
+const SCOPE_ALL = 0;
+const SCOPE_WRITER = 1;
+const SCOPE_READERS = 2;
+
+function scopeCode(on: OpenStepScope | undefined, index: number): number {
+	if (on === undefined || on === 'all') return SCOPE_ALL;
+	if (on === 'writer') return SCOPE_WRITER;
+	if (on === 'readers') return SCOPE_READERS;
+	throw new SQLiteError(`openSequence[${index}]: 'on' must be 'all', 'writer' or 'readers'`, SQLITE_MISUSE);
+}
+
+/**
+ * Turns `onOpen` / `openSequence` into the step list the native layer runs, and
+ * rejects a sequence that cannot work.
+ *
+ * Every check here is a programming error rather than an open failure, so they
+ * all report synchronously from `openDatabase()` — including under `asyncOpen`,
+ * where nothing else does.
+ */
+export function resolveOpenSequence(options: DatabaseOptions): NativeOpenStep[] {
+	if (options.openSequence && options.onOpen) {
+		throw new SQLiteError('onOpen and openSequence cannot be combined; onOpen is [OpenStep.key, ...onOpen, OpenStep.wal], so express the whole order in openSequence', SQLITE_MISUSE);
+	}
+
+	const source: OpenStep[] = options.openSequence ?? [OpenStep.key, ...(options.onOpen ?? []), OpenStep.wal];
+	const steps: NativeOpenStep[] = [];
+	let keyAt = -1;
+	let walAt = -1;
+
+	for (let i = 0; i < source.length; i++) {
+		const entry = source[i];
+		if (typeof entry === 'string') {
+			if (entry.length > 0) steps.push({ kind: STEP_SQL, scope: SCOPE_ALL, sql: entry });
+			continue;
+		}
+		if (entry == null || typeof entry !== 'object') {
+			throw new SQLiteError(`openSequence[${i}]: expected SQL, { sql, on }, OpenStep.key or OpenStep.wal`, SQLITE_MISUSE);
+		}
+		const marker = (entry as { step?: string }).step;
+		if (marker === 'key') {
+			if (keyAt >= 0) throw new SQLiteError('openSequence: OpenStep.key appears more than once', SQLITE_MISUSE);
+			keyAt = steps.length;
+			steps.push({ kind: STEP_KEY, scope: SCOPE_ALL, sql: '' });
+			continue;
+		}
+		if (marker === 'wal') {
+			if (walAt >= 0) throw new SQLiteError('openSequence: OpenStep.wal appears more than once', SQLITE_MISUSE);
+			walAt = steps.length;
+			steps.push({ kind: STEP_WAL, scope: SCOPE_WRITER, sql: '' });
+			continue;
+		}
+		const sql = (entry as { sql?: unknown }).sql;
+		if (typeof sql !== 'string') {
+			throw new SQLiteError(`openSequence[${i}]: expected SQL, { sql, on }, OpenStep.key or OpenStep.wal`, SQLITE_MISUSE);
+		}
+		if (sql.length > 0) steps.push({ kind: STEP_SQL, scope: scopeCode((entry as { on?: OpenStepScope }).on, i), sql });
+	}
+
+	if (options.encryptionKey) {
+		if (keyAt < 0) {
+			throw new SQLiteError('openSequence has no OpenStep.key but encryptionKey is set; without it the database would be written unencrypted', SQLITE_MISUSE);
+		}
+		if (walAt >= 0 && walAt < keyAt) {
+			throw new SQLiteError('openSequence puts OpenStep.wal before OpenStep.key; switching the journal mode reads the database, which cannot happen before the key is applied', SQLITE_MISUSE);
+		}
+	}
+
+	return steps;
+}
+
 export interface DatabaseOptions {
 	path: string;
 	readOnly?: boolean;
@@ -81,18 +184,45 @@ export interface DatabaseOptions {
 	 */
 	encryptionKeyFormat?: 'passphrase' | 'raw';
 	/**
-	 * SQL run on every connection in the pool immediately after `PRAGMA key`,
-	 * before the database is used for anything else. A statement that fails
-	 * aborts the open and reports its SQLite error.
+	 * SQL run on every connection immediately after `PRAGMA key` and before the
+	 * journal mode is switched to WAL. A statement that fails aborts the open and
+	 * reports its SQLite error.
 	 *
-	 * This is the only point at which per-connection setup can both see the
+	 * This is the first point at which per-connection setup can both see the
 	 * decrypted database and still precede every query. `sqlite3_auto_extension`
-	 * runs too early — inside `sqlite3_open_v2`, before any key has been applied —
-	 * so setup that needs a readable schema, such as registering an FTS5
-	 * tokenizer, must happen here instead. Ordinary connection state like
-	 * `PRAGMA foreign_keys=ON` fits here too.
+	 * runs too early — inside `sqlite3_open_v2`, before any key has been applied.
+	 * Ordinary connection state like `PRAGMA foreign_keys=ON` fits here too.
+	 *
+	 * Sugar for `openSequence: [OpenStep.key, ...onOpen, OpenStep.wal]`, which is
+	 * the default sequence. Reach for `openSequence` when you need a statement
+	 * somewhere else in that order, or on only some of the connections; the two
+	 * options cannot be combined.
 	 */
 	onOpen?: string[];
+	/**
+	 * The full order in which a connection is set up, replacing the default
+	 * `[OpenStep.key, ...onOpen, OpenStep.wal]`.
+	 *
+	 * Each entry is a SQL string, a `{ sql, on }` pair scoping it to the writer
+	 * or the readers, or one of the two markers `OpenStep.key` and `OpenStep.wal`
+	 * saying where the encryption key is applied and where the journal mode is
+	 * switched to WAL. Readers always receive `PRAGMA query_only=ON` after the
+	 * whole sequence, which is not part of it.
+	 *
+	 * Ordering is not free-form — SQLite constrains it:
+	 * the key must precede anything that reads the file, and switching the
+	 * journal mode reads the file, so WAL can never precede the key; `page_size`
+	 * and `auto_vacuum` only take effect on a new file before WAL. Leaving out
+	 * the `wal` marker leaves the journal mode alone, which means the readers and
+	 * the writer contend for the file — prefer `serialized: true` then.
+	 *
+	 * A sequence that cannot work is rejected by `openDatabase()` before anything
+	 * is opened: passing both `onOpen` and `openSequence`, repeating either
+	 * marker, putting `wal` before `key` with a key set, or setting
+	 * `encryptionKey` without a `key` marker — the last so that a forgotten
+	 * marker cannot quietly produce an unencrypted database.
+	 */
+	openSequence?: OpenStep[];
 	/**
 	 * Run every operation on the writer connection alone, with no reader pool.
 	 * Reads then never run concurrently with writes.
