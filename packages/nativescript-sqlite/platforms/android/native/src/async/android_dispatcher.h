@@ -18,6 +18,7 @@
 #include "v8.h"
 #include <android/looper.h>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -54,8 +55,14 @@ private:
     int      eventFd_{-1};
     ALooper* looper_{nullptr};
 
-    std::mutex                        completionMtx_;
-    std::vector<std::function<void()>> pending_;
+    // Shared-ownership so a drain can keep polling a queue after a completion
+    // has destroyed the dispatcher that owns it (close() deletes the DBInstance
+    // from inside its last completion).
+    struct CompletionQueue {
+        std::mutex                         mtx;
+        std::vector<std::function<void()>> pending;
+    };
+    std::shared_ptr<CompletionQueue> queue_{std::make_shared<CompletionQueue>()};
 
     ThreadPool pool_;
 };
