@@ -96,8 +96,11 @@ void ThreadPool::releaseInline() {
     inlineOwner_ = std::thread::id();
     busy_        = false;
     // Nothing queued means no worker can make progress, and the synchronous
-    // path would otherwise pay a futex wake per statement.
-    if (!tasks_.empty()) cv_.notify_one();
+    // path would otherwise pay a futex wake per statement.  A shutdown that
+    // began while this claim was held left its workers waiting on busy_, and
+    // this is the only place left to wake them.
+    if (stop_.load(std::memory_order_acquire)) cv_.notify_all();
+    else if (!tasks_.empty()) cv_.notify_one();
 }
 
 void ThreadPool::runInline(FnRef fn) {
