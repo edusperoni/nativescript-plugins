@@ -5,7 +5,7 @@
 	"sourceRoot": "packages/nativescript-sms-inbox",
 	"targets": {
 		"build": {
-			"executor": "@nrwl/js:tsc",
+			"executor": "@nx/js:tsc",
 			"options": {
 				"outputPath": "dist/packages/nativescript-sms-inbox",
 				"tsConfig": "packages/nativescript-sms-inbox/tsconfig.json",
