@@ -450,7 +450,7 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 		// later statements would land outside it.
 		if (result != null && typeof (result as any).then === 'function') {
 			this._endSync(txId, false);
-			throw new SQLiteError('transactionSync callback must be synchronous; use transaction() for asynchronous work', SQLITE_MISUSE);
+			throw new SQLiteError('transactionSync requires a synchronous callback, but it returned a promise; use transaction() instead', SQLITE_MISUSE);
 		}
 
 		try {

@@ -66,17 +66,18 @@ OpenSSL:
 | AES-256-CBC page crypto | 286 MiB/s | 1,702 MiB/s |
 
 The key derivation runs **on every connection**, and this plugin opens
-`poolSize + 2` of them — a writer, `poolSize` readers and a sync connection —
-**synchronously, on the JavaScript thread, inside `openDatabase()`**. At the
-default `poolSize: 4` that is six derivations before the first query. For a sense
-of scale, the `sqlite3mc` preset measured ≈ 90 ms per keyed connection and
-≈ 540 ms per `openDatabase()` on an emulator; **this configuration has not been
-measured on Android at all**, and the host ratios above are the only evidence
-there is. Two things reduce it:
+`1 + poolSize` of them — a writer and `poolSize` readers. Only the writer is
+keyed on the JavaScript thread; each reader derives its key on the thread that
+serves it, where the cost reappears as latency on the first read routed to that
+reader. For a sense of scale, the `sqlite3mc` preset measured ≈ 90 ms per keyed
+connection on an emulator; **this configuration has not been measured on Android
+at all**, and the host ratios above are the only evidence there is. Three things
+reduce it:
 
 - `encryptionKeyFormat: 'raw'` skips PBKDF2 entirely. Only do this if your key is
   already full-entropy random bytes — see
   [Passphrase vs raw key](../../../README.md#passphrase-vs-raw-key).
+- `asyncOpen: true` moves the writer's derivation off the JavaScript thread too.
 - `serialized: true` or a smaller `poolSize` means fewer connections to key.
 
 Size, measured on an arm64 link of the plugin: +93 KB over plain SQLite, with the

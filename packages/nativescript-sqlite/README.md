@@ -12,7 +12,8 @@ A high-performance SQLite plugin for NativeScript. All database operations run o
 - Write and read transactions with savepoint (nested transaction) support
 - Prepared statements
 - Two result formats: objects (`select`) or columnar arrays (`selectArray`)
-- Synchronous API available for simple use cases (migrations, setup)
+- Synchronous API sharing the writer connection with the async one — ordered against it, not racing it
+- Fully synchronous transactions (`transactionSync`) for migrations and setup
 - Custom SQLite builds supported (CocoaPods on iOS, a one-target CMake hook on Android)
 - Encryption on both platforms, in the same file format (SQLCipher on iOS, SQLite3MultipleCiphers on Android)
 - Drizzle ORM driver included
@@ -75,7 +76,7 @@ await db.close();
 
 ### `openDatabase(options): SQLiteDatabase`
 
-Opens a database and returns a `SQLiteDatabase` instance. The connection pool is created immediately.
+Opens a database and returns a `SQLiteDatabase` instance. The connection pool is created immediately; you can start using the database right away, without waiting for it — see [Opening off the JavaScript thread](#opening-off-the-javascript-thread).
 
 ```typescript
 const db = openDatabase({
@@ -96,6 +97,7 @@ const db = openDatabase({
 | `encryptionKey` | `string` | — | Applied to every connection via `PRAGMA key`. Requires an engine with a codec — see [Encryption Caveats](#encryption-caveats) |
 | `encryptionKeyFormat` | `'passphrase' \| 'raw'` | `'passphrase'` | How `encryptionKey` is interpreted. See [Passphrase vs raw key](#passphrase-vs-raw-key) |
 | `onOpen` | `string[]` | `[]` | SQL run on every connection right after `PRAGMA key`, before anything else. A statement that fails aborts the open |
+| `asyncOpen` | `boolean` | `false` | Open the writer on a background thread as well, so `openDatabase()` neither blocks nor throws. See [Opening off the JavaScript thread](#opening-off-the-javascript-thread) |
 
 > **In-memory databases:** passing `":memory:"` (or an empty path) defaults to **serialized mode** — a single connection handles all reads, writes, transactions, and sync calls. This is required because a pool of separate connections cannot share a private in-memory database. In serialized mode at most one transaction is active at a time and reads never run concurrently with writes. Each `openDatabase(":memory:")` call gets its own isolated database.
 >
@@ -107,11 +109,44 @@ const db = openDatabase({
 >
 > Prefer `memdb` over the older `?mode=memory&cache=shared` (shared-cache) form: shared cache uses table-level locking and returns `SQLITE_LOCKED` on contention, which `busyTimeout` does **not** retry; `memdb` returns a retryable `SQLITE_BUSY` instead. The shared in-memory database lives only while at least one connection is open (the pool keeps it alive), and is destroyed once the database is closed. The URI name must begin with `/`.
 
+#### Opening off the JavaScript thread
+
+Opening a connection is not always cheap. With an `encryptionKey` it costs a PBKDF2 derivation — [around 90 ms each](#the-cost-of-a-passphrase), once per connection — so where those opens run matters.
+
+- **Reader connections are always opened by their own threads.** Their key derivation never runs on the JavaScript thread; it surfaces as latency on the first read routed to each reader.
+- **The writer is opened synchronously inside `openDatabase()`** by default, so a bad path, a wrong key or a failing `onOpen` statement still throws from `openDatabase()` itself, where you would look for it.
+- **`asyncOpen: true` opens the writer on a background thread too.** `openDatabase()` then returns immediately and **never throws for an open failure** — there is nothing left in it that can fail.
+
+`initialized()` resolves once every connection is open, and rejects with the error that failed the open:
+
+```typescript
+const db = openDatabase({ path: dbPath, encryptionKey: passphrase, asyncOpen: true });
+
+try {
+  await db.initialized();
+} catch (e) {
+  // wrong key, bad path, a failing onOpen statement — nothing was thrown by openDatabase()
+}
+```
+
+**Awaiting it is optional**, `asyncOpen` or not. Async methods queue behind the opens on their own and reject with the open error if one failed; sync methods block until the writer is open and then run or throw. So the default case needs nothing at all:
+
+```typescript
+const db = openDatabase({ path: dbPath });
+await db.execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY)');
+```
+
+`initialized()` is there for callers that want the failure at a point of their choosing — which, with `asyncOpen`, is the only way to get it up front.
+
+A reader that fails to open is not quietly dropped from the pool: reads routed to it fail with that open error.
+
+`isOpen` is true from `openDatabase()` until `close()`, including while connections are still opening. It answers "has this database been closed", not "is it ready".
+
 ### SQLiteDatabase
 
 #### Async Methods
 
-All async methods dispatch work to background threads and return Promises. Reads use reader connections from the pool; writes use the dedicated writer connection.
+All async methods dispatch work to background threads and return Promises. Reads use reader connections from the pool; writes use the writer connection — the same one the [sync methods](#sync-methods) run on.
 
 ```typescript
 // Execute a write statement (INSERT, UPDATE, DELETE, CREATE, etc.)
@@ -136,22 +171,86 @@ const rowArr = await db.getArray(sql, params?);
 
 #### Sync Methods
 
-Synchronous methods block the JavaScript thread. They use a dedicated connection separate from the async pool. Use these for migrations, app setup, or when you need the result immediately and the query is fast.
+Synchronous methods block the JavaScript thread and hand you the result directly. Use these for migrations, app setup, or when the query is fast and you need the answer now.
 
 ```typescript
-db.executeSync(sql, params?);
+db.executeSync(sql, params?, options?);
 const rows = db.selectSync<MyType>(sql, params?);
 const result = db.selectArraySync(sql, params?);
 const row = db.getSync<MyType>(sql, params?);
 const rowArr = db.getArraySync(sql, params?);
 ```
 
+They run on the **writer connection** — the same connection the async API writes through, mutually exclusive with it and ordered behind it. A sync call runs inline on the calling thread when the writer is idle, and otherwise waits for whatever is already queued on the writer. There is no second writer, so a sync write and an async write can no longer contend for the file lock and time out against each other.
+
+Two consequences follow directly from sharing one connection:
+
+- a sync read sees an open transaction's **uncommitted** rows, because it is running on the connection that wrote them;
+- a sync call issued after a burst of un-awaited `execute()` calls sees **all** of them — the writer is FIFO, so there is nothing to await.
+
+```typescript
+db.execute('INSERT INTO users (name) VALUES (?)', ['Alice']); // not awaited
+db.execute('INSERT INTO users (name) VALUES (?)', ['Bob']);   // not awaited
+
+db.getSync('SELECT count(*) as n FROM users'); // => { n: 2 }
+```
+
+`readOnly` databases follow the same rule, with no special case.
+
+##### `executeSync` during an open transaction
+
+Running on the writer means a sync write issued while a transaction is open would silently become part of that transaction. Rather than let that happen, `executeSync` throws while a transaction opened through `transaction()` or `beginTransaction()` is active — immediately, before it touches SQLite:
+
+> a transaction is active on this database; use the transaction object's executeSync, or pass { joinTransaction: true } to run inside it
+
+It is a `SQLiteError` with code `SQLITE_BUSY` (5), and the message is identical on both platforms.
+
+Only `executeSync` is refused. Sync **reads** stay allowed and see the transaction's uncommitted rows, and a transaction driven entirely by `executeSync('BEGIN') … executeSync('COMMIT')` is not tracked by the plugin and keeps working unchanged.
+
+The asymmetry worth knowing about: plain async `db.execute()` during an open transaction **does** join the transaction, as it always has, and is not refused.
+
+##### Synchronous work inside a transaction
+
+Three sanctioned ways, in order of preference.
+
+**1. The transaction object's own sync methods.** `Transaction` offers `executeSync`, `selectSync`, `selectArraySync`, `getSync` and `getArraySync`; `ReadTransaction` offers the four reads. They run on the connection that owns the transaction, so they never reach the safeguard above.
+
+```typescript
+await db.transaction(async (tx) => {
+  tx.executeSync('INSERT INTO users (name) VALUES (?)', ['Alice']);
+  const { n } = tx.getSync<{ n: number }>('SELECT count(*) as n FROM users');
+  await tx.execute('INSERT INTO audit (note) VALUES (?)', [`users: ${n}`]);
+});
+```
+
+Using a transaction object after it has committed or rolled back throws `SQLITE_MISUSE` (21), sync methods included.
+
+**2. `db.transactionSync(fn)`**, when the whole transaction can be synchronous — see [Synchronous Transactions](#synchronous-transactions).
+
+**3. `executeSync(sql, params?, { joinTransaction: true })`** — the escape hatch, for code that cannot be handed the transaction object. The statement then runs inside whichever transaction is open, which means **it commits or rolls back with that transaction** rather than standing on its own.
+
+```typescript
+function applyLegacyMigrationStep(db: SQLiteDatabase) {
+  db.executeSync('UPDATE users SET seen = 1', undefined, { joinTransaction: true });
+}
+
+await db.transaction(async (tx) => {
+  await tx.execute('INSERT INTO users (name) VALUES (?)', ['Alice']);
+  applyLegacyMigrationStep(db); // joins this transaction; rolls back with it
+});
+```
+
+`params` stays positional, so `executeSync(sql, undefined, { joinTransaction: true })` is the no-parameters form. When no transaction is open the option makes no difference.
+
 #### Lifecycle
 
 ```typescript
-db.isOpen;        // boolean
-await db.close(); // waits for in-flight operations to finish, then closes all connections
+db.isOpen;              // boolean — true from openDatabase() until close()
+await db.initialized(); // resolves when every connection is open; optional
+await db.close();       // waits for in-flight operations to finish, then closes all connections
 ```
+
+`initialized()` and `isOpen` are described under [Opening off the JavaScript thread](#opening-off-the-javascript-thread).
 
 `close()` is async — it waits for all queued operations on the writer and reader queues to drain, rolls back any active write transaction, finalizes prepared statements, and rejects any pending queued transactions. The returned Promise resolves when everything is fully shut down.
 
@@ -203,6 +302,10 @@ const userId = await db.transaction(async (tx) => {
 
 If the callback throws, the transaction is rolled back. If it completes normally, it is committed. The return value of the callback is forwarded to the caller.
 
+If the COMMIT itself fails — a deferred constraint, a full disk — `transaction()` **rejects** with that error and the transaction is rolled back. Earlier versions resolved regardless, so a commit failure was invisible.
+
+While a transaction is open, `db.executeSync` refuses to run: see [`executeSync` during an open transaction](#executesync-during-an-open-transaction) for the three sanctioned ways to do synchronous work inside one.
+
 **Concurrent transactions** are safe — the second transaction waits for the first to finish before starting:
 
 ```typescript
@@ -227,6 +330,8 @@ await db.readTransaction(async (tx) => {
 
 Read transactions do not block the writer or other readers.
 
+> **Platform difference:** a failing COMMIT on a *read* transaction rejects on Android and is silent on iOS. On a write transaction both platforms reject.
+
 #### Nested Transactions (Savepoints)
 
 Use `savepoint()` inside a write transaction:
@@ -247,6 +352,35 @@ await db.transaction(async (tx) => {
   // Transaction commits with only Alice
 });
 ```
+
+#### Synchronous Transactions
+
+`transactionSync(fn)` runs a whole transaction without yielding: BEGIN, the callback, COMMIT — or ROLLBACK and a rethrow if the callback throws. The callback receives a `SyncTransaction`: the five sync methods plus `savepointSync`.
+
+```typescript
+const userId = db.transactionSync((tx) => {
+  tx.executeSync('INSERT INTO users (name) VALUES (?)', ['Alice']);
+  const { id } = tx.getSync<{ id: number }>('SELECT last_insert_rowid() as id');
+
+  tx.savepointSync((sp) => {
+    sp.executeSync('INSERT INTO profiles (user_id, bio) VALUES (?, ?)', [id, 'Hello!']);
+  });
+
+  return id;
+});
+```
+
+**The writer is held for the whole callback.** That is what makes the transaction airtight, and it has a consequence worth being explicit about: work already queued on the writer runs *before* the transaction starts, and work dispatched from *inside* the callback — an un-awaited `db.execute()`, say — stays on the queue and runs only once the transaction has committed or rolled back. It is therefore **not** part of the transaction and is not rolled back with it.
+
+```typescript
+db.transactionSync((tx) => {
+  tx.executeSync('INSERT INTO users (name) VALUES (?)', ['Alice']); // inside
+
+  db.execute('INSERT INTO users (name) VALUES (?)', ['Bob']);       // queued; runs after COMMIT
+});
+```
+
+The callback must be synchronous. Returning a thenable rolls the transaction back and throws `SQLITE_MISUSE` (21), because the continuation could not have run inside the transaction anyway — an `async` callback here would be quietly wrong, so it is refused instead.
 
 ### Prepared Statements
 
@@ -285,7 +419,7 @@ const single = await db.getArray('SELECT id, name FROM users WHERE id = ?', [1])
 // single.rows    => [[1, 'Alice']]  (or [] if no match)
 ```
 
-Available on all contexts: `db.selectArray()`, `db.getArray()`, `db.selectArraySync()`, `db.getArraySync()`, `tx.selectArray()`, `tx.getArray()`, `stmt.selectArray()`, `stmt.getArray()`.
+Available on all contexts: `db.selectArray()`, `db.getArray()`, `db.selectArraySync()`, `db.getArraySync()`, `tx.selectArray()`, `tx.getArray()`, `tx.selectArraySync()`, `tx.getArraySync()`, `stmt.selectArray()`, `stmt.getArray()`.
 
 ### Error Handling
 
@@ -316,6 +450,18 @@ const rows = await db.selectInTransaction(txId, 'SELECT * FROM users');
 await db.commitTransaction(txId);
 // or: await db.rollbackTransaction(txId);
 ```
+
+Each of the three statement methods has a synchronous counterpart that runs on the connection owning the transaction, for drivers that have to produce a result without yielding:
+
+```typescript
+db.executeInTransactionSync(txId, sql, params?);
+const rows = db.selectInTransactionSync(txId, sql, params?);
+const result = db.selectArrayInTransactionSync(txId, sql, params?);
+```
+
+A `txId` that is unknown or already finished throws a `SQLiteError` with code `SQLITE_MISUSE` (21). The wording differs between platforms — Android says `invalid transaction id <n>`, iOS says `Invalid transaction ID` — so branch on the code, never the message.
+
+A transaction opened with `beginTransaction()` is tracked like any other, so `db.executeSync` refuses to join it until it is committed or rolled back. See [`executeSync` during an open transaction](#executesync-during-an-open-transaction).
 
 These are used by the drizzle driver to scope each drizzle transaction to its own `txId`, enabling safe concurrent transactions through `Promise.all`.
 
@@ -351,16 +497,17 @@ Requires `drizzle-orm` as a peer dependency (`>=0.45.0`).
 
 ### Connection Pool
 
-The plugin opens multiple SQLite connections to the same database file:
+The plugin opens `1 + poolSize` SQLite connections to the same database file:
 
-- **1 writer connection** — opened with `SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE`. All writes (`execute`, write transactions) dispatch to a serial GCD queue, ensuring only one write happens at a time.
+- **1 writer connection** — opened with `SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE`. All writes (`execute`, write transactions) **and every synchronous method** dispatch to a serial GCD queue, so one of them runs at a time, in the order it was issued.
 - **N reader connections** — opened with `SQLITE_OPEN_READWRITE` + `PRAGMA query_only=ON`. Reads (`select`, `get`) are distributed across readers via round-robin, each with its own serial GCD queue. Multiple reads can run concurrently on different readers. Readers open as READWRITE so they can initialize WAL shared memory, but `query_only` prevents accidental writes.
-- **1 sync connection** — opened lazily on the first sync call. Used exclusively by `executeSync`/`selectSync`/`getSync` on the main thread.
 - **Transaction queue** — concurrent `transaction()` calls are queued. The next transaction's `BEGIN` only dispatches after the previous one commits or rolls back.
+
+There is no separate connection behind the `*Sync` methods; they share the writer, which is what gives them their ordering guarantees — see [Sync Methods](#sync-methods).
 
 WAL (Write-Ahead Logging) mode is enabled automatically on the writer. WAL allows readers to proceed without blocking writes, and writes to proceed without blocking readers.
 
-The queue descriptions above are iOS terminology. Android has the same structure — one writer, `poolSize` readers, a sync connection, a transaction queue — built on a native thread pool instead of GCD. One difference worth knowing: Android opens all `poolSize + 2` connections eagerly inside `openDatabase()`, rather than creating the sync connection on first use. With an `encryptionKey` that matters, because every connection is keyed — see [The cost of a passphrase](#the-cost-of-a-passphrase).
+The queue descriptions above are iOS terminology. Android has the same structure — one writer, `poolSize` readers, a transaction queue — built on a native thread pool instead of GCD. Both platforms open each reader on the thread that serves it, and open the writer inside `openDatabase()` unless [`asyncOpen`](#opening-off-the-javascript-thread) moves it off too. With an `encryptionKey` that matters, because every connection is keyed — see [The cost of a passphrase](#the-cost-of-a-passphrase).
 
 ### Performance
 
@@ -411,11 +558,11 @@ const db = openDatabase({
 });
 ```
 
-Every connection in the pool (writer, readers, sync) automatically receives the key via `PRAGMA key` after opening. If the key is wrong or missing for an encrypted database, operations will fail with `SQLITE_NOTADB`.
+Every connection (the writer and each reader) automatically receives the key via `PRAGMA key` after opening. If the key is wrong or missing for an encrypted database, operations will fail with `SQLITE_NOTADB`.
 
 #### Passphrase vs raw key
 
-The string above is a passphrase: SQLCipher stretches it with PBKDF2 (256,000 iterations by default) **once per connection**, so a pool of 4 pays that cost four times before the first query.
+The string above is a passphrase: SQLCipher stretches it with PBKDF2 (256,000 iterations by default) **once per connection**, so `poolSize: 4` pays that cost five times. [The cost of a passphrase](#the-cost-of-a-passphrase) has the measurements and says which of those five land on the JavaScript thread.
 
 If your key is already full-entropy random bytes, ask for the raw form instead and skip derivation entirely:
 
@@ -484,33 +631,37 @@ What you should know about it:
 - **It produces SQLCipher 4 files.** The preset is compiled with `CODEC_TYPE=CODEC_TYPE_SQLCIPHER` and `SQLITE3MC_USE_SQLCIPHER_LEGACY`, which makes a plain `PRAGMA key` read and write SQLCipher 4 databases. A database created here opens under `pod 'SQLCipher'` on iOS and vice versa, with passphrases and with raw keys, so one encrypted file can be shared across both platforms of the same app. This was verified against SQLCipher 4.16.0 at its default settings, on a host build, covering ordinary tables, FTS5 and non-ASCII text; SQLCipher's non-default cipher settings and WAL mode were not part of that test.
 - **It brings its own crypto.** No OpenSSL, no Prefab dependency, no extra `.so` in the APK. Hardware AES on arm64 is detected at run time, with no compiler flags — forcing `-maes`-style flags actually breaks armeabi-v7a.
 - **Passphrase or raw key** work exactly as on iOS, through `encryptionKeyFormat`. See [Passphrase vs raw key](#passphrase-vs-raw-key) — that section applies verbatim here.
-- **Key derivation is paid per connection, and `openDatabase()` pays all of it up front.** See [The cost of a passphrase](#the-cost-of-a-passphrase) below — it is the single most important thing to know before shipping this.
+- **Key derivation is paid per connection.** The writer's is paid by `openDatabase()`; the readers' are paid on their own threads. See [The cost of a passphrase](#the-cost-of-a-passphrase) below — it is the single most important thing to know before shipping this.
 - **SQLCipher's own pragmas do not exist here.** `cipher_version`, `cipher_migrate`, `cipher_compatibility`, `sqlcipher_export` and the rest are not implemented by SQLite3MC and are **silently ignored** — SQLite ignores an unknown pragma rather than failing. Code that branches on `PRAGMA cipher_version`, migrates legacy databases with `cipher_migrate`, or exports with `sqlcipher_export()` will not do what it did on iOS. Those apps want real SQLCipher through the app-provided directory: see [SQLCipher with LibTomCrypt](docs/android-custom-sqlite/sqlcipher-libtomcrypt).
 - **You can confirm at run time that you really got this preset.** `SELECT sqlite3mc_version()` returns `SQLite3 Multiple Ciphers <version>`, and `PRAGMA cipher` returns `sqlcipher` — the SQLCipher-legacy setting above, read back from the live engine. [Encryption Caveats](#the-engine-specific-assertion) turns the first of those into a one-line `onOpen` assertion that fails the open on any other engine, which is worth having if a mis-set Gradle property would otherwise drop you onto `bundled`.
 
 #### The cost of a passphrase
 
-A passphrase is stretched with PBKDF2-HMAC-SHA512 at 256,000 iterations, **once per `PRAGMA key`** — and the plugin keys `poolSize + 2` connections (one writer, `poolSize` readers, one sync connection), all of them **synchronously, on the JavaScript thread**, inside `openDatabase()`.
+A passphrase is stretched with PBKDF2-HMAC-SHA512 at 256,000 iterations, **once per `PRAGMA key`** — roughly 90 ms per connection — and every connection is keyed. At the default `poolSize: 4` that is five derivations: one writer, four readers.
 
-Measured on an emulator with the `sqlite3mc` preset in SQLCipher-legacy mode, across two runs:
+What matters is *where* they run. Readers are opened by their own threads, so only the writer's derivation lands on the JavaScript thread — and `asyncOpen: true` moves that one off as well.
 
-| | `openDatabase()` |
-|---|---|
-| no key | 2.5 – 2.8 ms |
-| passphrase, `poolSize: 4` (default — 6 connections) | ≈ 540 – 580 ms |
-| passphrase, `poolSize: 1` (3 connections) | ≈ 260 – 310 ms |
-| passphrase, per keyed connection | ≈ 90 ms |
-| **raw key, `poolSize: 4`** | **0.66 ms** |
+Measured on an emulator with the `sqlite3mc` preset in SQLCipher-legacy mode, `poolSize: 4`:
 
-These are emulator numbers, not device numbers; treat the shape as real and the absolute values as indicative. Half a second of blocked JavaScript at startup is enough to matter either way.
+| | before this change | now |
+|---|---|---|
+| `openDatabase()` with a passphrase (JS thread blocked) | ≈ 582 ms | **93 ms** |
+| first pooled read afterwards | — | ≈ 92 ms |
+| `openDatabase()` with a raw key | 0.66 ms | **0.67 ms** |
+| `openDatabase()` with no key | ≈ 2.5 ms | ≈ 3.4 ms |
 
-**A raw key does not reduce that cost — it removes it.** With no PBKDF2 to run, a keyed open is as cheap as an unkeyed one (0.66 ms against 2.5 – 2.8 ms unkeyed; the first query afterwards took 0.39 ms). If your key is already full-entropy random bytes, this is the whole problem solved, and it is the first thing to reach for:
+Read that honestly: the derivations did not get faster, they moved. The JavaScript thread now pays **one** instead of six — the four readers derive on their own threads, and the sixth connection, the old dedicated sync one, no longer exists. The readers' cost has not vanished; it reappears as ≈ 92 ms of latency on the **first read routed to each reader**, once per reader. Trading a frozen UI for a slow first query is almost always the right trade, but it is a trade.
+
+These are emulator numbers, not device numbers; treat the shape as real and the absolute values as indicative.
+
+**A raw key does not reduce that cost — it removes it.** With no PBKDF2 to run, a keyed open is as cheap as an unkeyed one, on the writer and on every reader alike. If your key is already full-entropy random bytes, this is the whole problem solved, and it is the first thing to reach for:
 
 - **`encryptionKeyFormat: 'raw'` with a 64-hex key.** There is nothing to stretch in a random key, so the two forms are equally strong for one, and interoperability with official SQLCipher was verified in both directions with raw keys. This is *not* a shortcut for a human-chosen passphrase, where the derivation is exactly what makes guessing expensive — see [Passphrase vs raw key](#passphrase-vs-raw-key).
 
-If you must stretch a passphrase, two things reduce how many times you pay for it:
+If you must stretch a passphrase, three things reduce what it costs you:
 
-- **A smaller `poolSize`** — each reader you drop is one derivation you do not pay.
+- **[`asyncOpen: true`](#opening-off-the-javascript-thread)** — the writer opens on a background thread too, so no derivation at all runs on the JavaScript thread. `openDatabase()` then cannot report an open failure; `initialized()` does.
+- **A smaller `poolSize`** — each reader you drop is one derivation you do not pay and one first-read stall you do not take.
 - **`serialized: true`** — one connection handles everything, so one derivation. Reads no longer run concurrently with writes; for a small database that is often a fair trade.
 
 #### Adding compile flags
@@ -844,6 +995,11 @@ interface DatabaseOptions {
   encryptionKeyFormat?: 'passphrase' | 'raw';
   onOpen?: string[];
   serialized?: boolean;
+  asyncOpen?: boolean;
+}
+
+interface ExecuteSyncOptions {
+  joinTransaction?: boolean;
 }
 ```
 
