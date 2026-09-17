@@ -58,6 +58,13 @@ function expectRows(caseName: string, actual: number, expected: number) {
 	if (actual !== expected) throw new Error(caseName + ' returned ' + actual + ' rows, expected ' + expected);
 }
 
+// Runs untimed after each sample: a write path that silently drops work must fail, not look fast.
+function expectCountAndClear(caseName: string, db: SQLiteDatabase, table: string, expected: number) {
+	const row = db.getSync<{ c: number }>('SELECT count(*) AS c FROM ' + table);
+	expectRows(caseName, row ? row.c : -1, expected);
+	db.executeSync('DELETE FROM ' + table);
+}
+
 function seedMarshalTable(db: SQLiteDatabase, rows: number) {
 	db.executeSync('CREATE TABLE m (id INTEGER PRIMARY KEY, r REAL, s TEXT, t TEXT, n INTEGER, nt TEXT)');
 	const long = makeText(200, 7);
@@ -224,7 +231,7 @@ export function buildCases(quick: boolean): BenchCase[] {
 				db.executeSync('COMMIT');
 			},
 			afterEach() {
-				db.executeSync('DELETE FROM p8');
+				expectCountAndClear('params/positional-8', db, 'p8', iterations);
 			},
 			async teardown() {
 				await db.close();
@@ -253,7 +260,7 @@ export function buildCases(quick: boolean): BenchCase[] {
 				db.executeSync('COMMIT');
 			},
 			afterEach() {
-				db.executeSync('DELETE FROM p8');
+				expectCountAndClear('params/named-8', db, 'p8', iterations);
 			},
 			async teardown() {
 				await db.close();
@@ -370,7 +377,7 @@ export function buildCases(quick: boolean): BenchCase[] {
 				db.executeSync('COMMIT');
 			},
 			afterEach() {
-				db.executeSync('DELETE FROM b');
+				expectCountAndClear('blob/write-1MBx8', db, 'b', iterations);
 			},
 			async teardown() {
 				await db.close();
@@ -435,7 +442,7 @@ export function buildCases(quick: boolean): BenchCase[] {
 				await stmt.finalize();
 			},
 			afterEach() {
-				db.executeSync('DELETE FROM p');
+				expectCountAndClear('prepared/insert-tx-5000', db, 'p', iterations);
 			},
 			async teardown() {
 				await db.close();
@@ -519,7 +526,7 @@ export function buildCases(quick: boolean): BenchCase[] {
 				});
 			},
 			afterEach() {
-				db.executeSync('DELETE FROM t');
+				expectCountAndClear('tx/insert-async-5000', db, 't', iterations);
 			},
 			async teardown() {
 				await db.close();
@@ -547,7 +554,7 @@ export function buildCases(quick: boolean): BenchCase[] {
 				for (let i = 0; i < iterations; i++) await db.execute('INSERT INTO t VALUES (?, ?)', [i, 'v' + i]);
 			},
 			afterEach() {
-				db.executeSync('DELETE FROM t');
+				expectCountAndClear('tx/autocommit-insert-500', db, 't', iterations);
 			},
 			async teardown() {
 				await db.close();
