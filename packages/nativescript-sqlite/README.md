@@ -517,6 +517,17 @@ The queue descriptions above are iOS terminology. Android has the same structure
 - The `selectArray` / `getArray` format avoids repeating column names per row, reducing both serialization cost and memory usage for large result sets.
 - Named parameters (`:name`, `$name`, `@name`) are bound natively on both platforms via `sqlite3_bind_parameter_index`. The prefix is added automatically if omitted — pass `{ name: 'Alice' }` and the binding adds the `:` before looking up the parameter index.
 
+### Platform Differences
+
+The API and its semantics are the same on both platforms. What still differs:
+
+- **Read transactions.** `readTransaction()` runs on a reader connection on iOS and on the writer connection (as a deferred transaction) on Android, where it therefore queues with writes.
+- **Error codes.** `SQLiteError.code` is the primary result code on both. `extendedCode` is populated on iOS only.
+- **A failing COMMIT of a read transaction** rejects on Android and is silent on iOS. Write transactions reject on both.
+- **A reader that cannot be opened** fails the open on Android (`initialized()` rejects, and so does every later call); on iOS only the reads routed to that reader fail.
+- **In-memory databases with `serialized: false`.** Android rewrites `:memory:` to a named shared-cache URI so the pool sees one database; iOS passes the path through, so use a `file:…?mode=memory&cache=shared` URI yourself there.
+- **Message wording** of some errors differs (for example an unknown transaction id). Branch on `code`, not on the message.
+
 ## iOS SQLite Linking
 
 The plugin does **not** bundle or link a SQLite library on iOS — you must provide one. This gives you full control over the SQLite version and features available. Add **one** of the following to your app:
