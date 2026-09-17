@@ -1,6 +1,6 @@
-import { DatabaseOptions, RuntimeInfo, SQLITE_ERROR, SQLiteArrayResult, SQLiteDatabase, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, Transaction, ReadTransaction, PreparedStatement, isInMemoryPath, resolveEncryptionKey } from './common';
+import { DatabaseOptions, ExecuteSyncOptions, RuntimeInfo, SQLITE_ERROR, SQLITE_MISUSE, SQLiteArrayResult, SQLiteDatabase, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, SyncTransaction, Transaction, ReadTransaction, PreparedStatement, isInMemoryPath, resolveEncryptionKey } from './common';
 
-export { DatabaseOptions, RuntimeInfo, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, ReadTransaction, Transaction, PreparedStatement, isInMemoryPath, resolveEncryptionKey };
+export { DatabaseOptions, ExecuteSyncOptions, RuntimeInfo, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, ReadTransaction, SyncTransaction, Transaction, PreparedStatement, isInMemoryPath, resolveEncryptionKey };
 export type { SQLiteDatabase };
 export {
 	SQLITE_OK,
@@ -77,6 +77,7 @@ interface NativeOpenOptions {
 	encryptionKey: string | null;
 	onOpen: string[];
 	serialized: boolean;
+	asyncOpen: boolean;
 }
 
 // The native layer rejects/throws plain Error objects with a `.code` number
@@ -184,11 +185,41 @@ class ReadTransactionImpl implements ReadTransaction {
 		}
 		return { columns: res.columns, rows: [] };
 	}
+
+	selectSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T[] {
+		try {
+			return this._db.selectInTransactionSync(this._txId, sql, params, 1);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
+	}
+
+	selectArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T> {
+		try {
+			return this._db.selectInTransactionSync(this._txId, sql, params, 2);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
+	}
+
+	getSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T | undefined {
+		const res = this.selectSync<T>(sql, params);
+		return res && res.length > 0 ? res[0] : undefined;
+	}
+
+	getArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T> {
+		const res = this.selectArraySync<T>(sql, params);
+		if (res && res.rows && res.rows.length > 0) {
+			return { columns: res.columns, rows: [res.rows[0]] as any };
+		}
+		return { columns: res.columns, rows: [] };
+	}
 }
 
-class TransactionImpl extends ReadTransactionImpl implements Transaction {
-	private static _savepointSeq = 0;
+/** Names savepoints uniquely across every transaction object in the process. */
+let savepointSeq = 0;
 
+class TransactionImpl extends ReadTransactionImpl implements Transaction {
 	constructor(db: any, txId: number) {
 		super(db, txId);
 	}
@@ -201,8 +232,16 @@ class TransactionImpl extends ReadTransactionImpl implements Transaction {
 		}
 	}
 
+	executeSync(sql: string, params?: SQLiteParams): void {
+		try {
+			this._db.executeInTransactionSync(this._txId, sql, params);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
+	}
+
 	async savepoint<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> {
-		const name = `_sp${TransactionImpl._savepointSeq++}`;
+		const name = `_sp${savepointSeq++}`;
 		await this.execute(`SAVEPOINT ${name}`);
 		try {
 			const result = await fn(this);
@@ -216,12 +255,72 @@ class TransactionImpl extends ReadTransactionImpl implements Transaction {
 	}
 }
 
+class SyncTransactionImpl implements SyncTransaction {
+	constructor(
+		private _db: any,
+		private _txId: number,
+	) {}
+
+	executeSync(sql: string, params?: SQLiteParams): void {
+		try {
+			this._db.executeInTransactionSync(this._txId, sql, params);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
+	}
+
+	selectSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T[] {
+		try {
+			return this._db.selectInTransactionSync(this._txId, sql, params, 1);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
+	}
+
+	selectArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T> {
+		try {
+			return this._db.selectInTransactionSync(this._txId, sql, params, 2);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
+	}
+
+	getSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T | undefined {
+		const res = this.selectSync<T>(sql, params);
+		return res && res.length > 0 ? res[0] : undefined;
+	}
+
+	getArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T> {
+		const res = this.selectArraySync<T>(sql, params);
+		if (res && res.rows && res.rows.length > 0) {
+			return { columns: res.columns, rows: [res.rows[0]] as any };
+		}
+		return { columns: res.columns, rows: [] };
+	}
+
+	savepointSync<T>(fn: (tx: SyncTransaction) => T): T {
+		const name = `_sp${savepointSeq++}`;
+		this.executeSync(`SAVEPOINT ${name}`);
+		try {
+			const result = fn(this);
+			this.executeSync(`RELEASE SAVEPOINT ${name}`);
+			return result;
+		} catch (e) {
+			this.executeSync(`ROLLBACK TO SAVEPOINT ${name}`);
+			this.executeSync(`RELEASE SAVEPOINT ${name}`);
+			throw e;
+		}
+	}
+}
+
 class SQLiteDatabaseImpl implements SQLiteDatabase {
 	private _db: any;
 	private _isOpen = false;
+	private _path: string;
 
 	constructor(options: DatabaseOptions) {
 		const serialized = options.serialized ?? isInMemoryPath(options.path);
+		this._path = options.path;
 		const native: NativeOpenOptions = {
 			readOnly: options.readOnly ?? false,
 			poolSize: options.poolSize ?? 4,
@@ -229,6 +328,7 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 			encryptionKey: resolveEncryptionKey(options),
 			onOpen: options.onOpen ?? [],
 			serialized,
+			asyncOpen: options.asyncOpen ?? false,
 		};
 
 		// Each sqlite3_open_v2(':memory:') call creates a new independent in-memory
@@ -301,7 +401,7 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 			await this.commitTransaction(txId);
 			return res;
 		} catch (e) {
-			await this.rollbackTransaction(txId);
+			await this._rollbackQuietly(txId);
 			throw e;
 		}
 	}
@@ -314,8 +414,58 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 			await this.commitTransaction(txId);
 			return res;
 		} catch (e) {
-			await this.rollbackTransaction(txId);
+			await this._rollbackQuietly(txId);
 			throw e;
+		}
+	}
+
+	// A COMMIT that fails rolls its transaction back and retires the id itself, so
+	// this rollback then reports an unknown id. Whatever it says, the caller's own
+	// error is the one worth propagating.
+	private async _rollbackQuietly(txId: number): Promise<void> {
+		try {
+			await this.rollbackTransaction(txId);
+		} catch (e) {
+			/* see above */
+		}
+	}
+
+	transactionSync<T>(fn: (tx: SyncTransaction) => T): T {
+		let txId: number;
+		try {
+			txId = this._db.beginTransactionSync('deferred');
+		} catch (e) {
+			rewrapNativeError(e);
+		}
+
+		let result: T;
+		try {
+			result = fn(new SyncTransactionImpl(this._db, txId));
+		} catch (e) {
+			this._endSync(txId, false);
+			throw e;
+		}
+
+		// A thenable would continue after the transaction has already ended, so its
+		// later statements would land outside it.
+		if (result != null && typeof (result as any).then === 'function') {
+			this._endSync(txId, false);
+			throw new SQLiteError('transactionSync callback must be synchronous; use transaction() for asynchronous work', SQLITE_MISUSE);
+		}
+
+		try {
+			this._db.endTransactionSync(txId, true);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
+		return result;
+	}
+
+	private _endSync(txId: number, commit: boolean): void {
+		try {
+			this._db.endTransactionSync(txId, commit);
+		} catch (e) {
+			/* the caller's own error is the one worth reporting */
 		}
 	}
 
@@ -329,9 +479,9 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 		return new PreparedStatementImpl(this._db, stmtId);
 	}
 
-	executeSync(sql: string, params?: SQLiteParams): void {
+	executeSync(sql: string, params?: SQLiteParams, options?: ExecuteSyncOptions): void {
 		try {
-			this._db.executeSync(sql, params);
+			this._db.executeSync(sql, params, options?.joinTransaction === true);
 		} catch (e) {
 			rewrapNativeError(e);
 		}
@@ -401,6 +551,30 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 		}
 	}
 
+	executeInTransactionSync(txId: number, sql: string, params?: SQLiteParams): void {
+		try {
+			this._db.executeInTransactionSync(txId, sql, params);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
+	}
+
+	selectInTransactionSync(txId: number, sql: string, params?: SQLiteParams): SQLiteRow[] {
+		try {
+			return this._db.selectInTransactionSync(txId, sql, params, 1);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
+	}
+
+	selectArrayInTransactionSync(txId: number, sql: string, params?: SQLiteParams): SQLiteArrayResult {
+		try {
+			return this._db.selectInTransactionSync(txId, sql, params, 2);
+		} catch (e) {
+			rewrapNativeError(e);
+		}
+	}
+
 	async commitTransaction(txId: number): Promise<void> {
 		try {
 			await this._db.commitTransaction(txId);
@@ -422,6 +596,14 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 			return this._db.getRuntimeInfo();
 		} catch (e) {
 			rewrapNativeError(e);
+		}
+	}
+
+	async initialized(): Promise<void> {
+		try {
+			await this._db.initialized();
+		} catch (e) {
+			toOpenError(e, this._path);
 		}
 	}
 

@@ -49,21 +49,28 @@ bool sqliteIsThreadSafe() {
 
 // ── Construction / destruction ───────────────────────────────────────────────
 
-SQLiteConnection::SQLiteConnection(const OpenOptions& opts)
-    : path_(opts.path)
+bool SQLiteConnection::open(const OpenOptions& opts) {
+    path_ = opts.path;
+    if (runOpenSequence(opts)) return true;
+    openFailed_ = true;
+    openError_  = errorResult();
+    return false;
+}
+
+bool SQLiteConnection::runOpenSequence(const OpenOptions& opts)
 {
 #ifdef NSCSQLITE_ENGINE_HAS_NO_CODEC
     // PRAGMA key is a silent no-op without a codec, which would write plaintext
     // under a caller who asked for encryption.
     if (!opts.encryptionKey.empty()) {
         setError(kNoCodecMessage, SQLITE_MISUSE);
-        return;
+        return false;
     }
 #endif
 
     if (!sqliteIsThreadSafe()) {
         setError(kThreadUnsafeMessage, SQLITE_MISUSE);
-        return;
+        return false;
     }
 
     // SQLITE_OPEN_URI is always added so callers can use URI filenames (e.g.
@@ -72,8 +79,8 @@ SQLiteConnection::SQLiteConnection(const OpenOptions& opts)
     int flags = opts.readOnly
         ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_URI)
         : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_URI);
-    // NOMUTEX for connections accessed from a single thread only (sync path on JS thread).
-    // FULLMUTEX for shared connections where worker threads may call concurrently.
+    // NOMUTEX for connections used by one thread at a time, which is all of them:
+    // the dispatcher that owns a connection is what serializes its users.
     flags |= opts.noMutex ? SQLITE_OPEN_NOMUTEX : SQLITE_OPEN_FULLMUTEX;
     cacheEnabled_ = opts.noMutex; // stmt cache is safe only for single-threaded connections
 
@@ -83,7 +90,7 @@ SQLiteConnection::SQLiteConnection(const OpenOptions& opts)
         // message only lives on that handle — so read it before closing.
         setError(db_ ? sqlite3_errmsg(db_) : "out of memory allocating the database handle", rc);
         if (db_) { sqlite3_close(db_); db_ = nullptr; }
-        return;
+        return false;
     }
 
     if (opts.busyTimeoutMs > 0)
@@ -92,7 +99,7 @@ SQLiteConnection::SQLiteConnection(const OpenOptions& opts)
     // Encryption (SQLCipher / SEE pattern)
     if (!opts.encryptionKey.empty()) {
         if (!runOpenStatement("PRAGMA key = " + encryptionKeyLiteral(opts.encryptionKey)))
-            return;
+            return false;
     }
 
     // Runs after the key, so these statements are the first ones that can read the
@@ -102,14 +109,16 @@ SQLiteConnection::SQLiteConnection(const OpenOptions& opts)
     // before any key has been applied.
     for (const std::string& sql : opts.onOpen) {
         if (sql.empty()) continue;
-        if (!runOpenStatement(sql)) return;
+        if (!runOpenStatement(sql)) return false;
     }
 
     if (opts.journalWAL && !runOpenStatement("PRAGMA journal_mode=WAL"))
-        return;
+        return false;
 
     if (opts.queryOnly && !runOpenStatement("PRAGMA query_only=ON"))
-        return;
+        return false;
+
+    return true;
 }
 
 bool SQLiteConnection::runOpenStatement(const std::string& sql) {
@@ -139,8 +148,18 @@ void SQLiteConnection::close() {
     execCache_.clear();
     stmtRegistry_.clear();
     txRegistry_.clear();
+    asyncTxCount_.store(0, std::memory_order_release);
     sqlite3_close_v2(db_);
     db_ = nullptr;
+}
+
+QueryResult SQLiteConnection::unavailableError() const {
+    if (openFailed_) return openError_;
+    QueryResult r;
+    r.success   = false;
+    r.error     = "database is closed";
+    r.errorCode = SQLITE_MISUSE;
+    return r;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -416,7 +435,7 @@ bool SQLiteConnection::hasStatement(uint32_t stmtId) const {
 
 // ── Transactions ──────────────────────────────────────────────────────────────
 
-uint32_t SQLiteConnection::beginTransaction(TxBehavior behavior) {
+uint32_t SQLiteConnection::beginTransaction(TxBehavior behavior, bool syncSpan) {
     DbGuard guard(opMutex_);
     if (!db_) { setError("database is closed", SQLITE_MISUSE); return 0; }
 
@@ -437,8 +456,10 @@ uint32_t SQLiteConnection::beginTransaction(TxBehavior behavior) {
     }
 
     auto tx = std::make_unique<ActiveTransaction>();
+    tx->syncSpan = syncSpan;
     uint32_t id = txRegistry_.add(std::move(tx));
     txRegistry_.get(id)->id = id;
+    if (!syncSpan) asyncTxCount_.fetch_add(1, std::memory_order_acq_rel);
     return id;
 }
 
@@ -456,22 +477,62 @@ QueryResult SQLiteConnection::selectInTransaction(uint32_t txId, const std::stri
     return executeInTransaction(txId, sql, params);
 }
 
-void SQLiteConnection::commitTransaction(uint32_t txId) {
-    DbGuard guard(opMutex_);
-    if (!txRegistry_.contains(txId)) { setError("invalid tx id", SQLITE_MISUSE); return; }
-    char* errmsg = nullptr;
-    sqlite3_exec(db_, "COMMIT", nullptr, nullptr, &errmsg);
-    sqlite3_free(errmsg);
-    txRegistry_.remove(txId);
+// Drops the registry entry and, for an asynchronous transaction, the count the
+// executeSync safeguard reads.
+void SQLiteConnection::forgetTransaction(uint32_t txId) {
+    auto tx = txRegistry_.remove(txId);
+    if (tx && !tx->syncSpan) asyncTxCount_.fetch_sub(1, std::memory_order_acq_rel);
 }
 
-void SQLiteConnection::rollbackTransaction(uint32_t txId) {
+QueryResult SQLiteConnection::commitTransaction(uint32_t txId) {
     DbGuard guard(opMutex_);
-    if (!txRegistry_.contains(txId)) { setError("invalid tx id", SQLITE_MISUSE); return; }
+    if (!txRegistry_.contains(txId)) {
+        setError("invalid transaction id " + std::to_string(txId), SQLITE_MISUSE);
+        return errorResult();
+    }
+
     char* errmsg = nullptr;
-    sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, &errmsg);
+    int rc = sqlite3_exec(db_, "COMMIT", nullptr, nullptr, &errmsg);
+    if (rc != SQLITE_OK) {
+        std::string msg = errmsg ? errmsg : "commit failed";
+        sqlite3_free(errmsg);
+        // A failed COMMIT leaves the transaction open, which the next statement
+        // on this connection would silently join.
+        char* rollbackErr = nullptr;
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, &rollbackErr);
+        sqlite3_free(rollbackErr);
+        forgetTransaction(txId);
+        setError(msg, rc);
+        return errorResult();
+    }
     sqlite3_free(errmsg);
-    txRegistry_.remove(txId);
+    forgetTransaction(txId);
+
+    QueryResult result;
+    result.success = true;
+    return result;
+}
+
+QueryResult SQLiteConnection::rollbackTransaction(uint32_t txId) {
+    DbGuard guard(opMutex_);
+    if (!txRegistry_.contains(txId)) {
+        setError("invalid transaction id " + std::to_string(txId), SQLITE_MISUSE);
+        return errorResult();
+    }
+
+    char* errmsg = nullptr;
+    int rc = sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, &errmsg);
+    std::string msg = errmsg ? errmsg : "rollback failed";
+    sqlite3_free(errmsg);
+    forgetTransaction(txId);
+    if (rc != SQLITE_OK) {
+        setError(msg, rc);
+        return errorResult();
+    }
+
+    QueryResult result;
+    result.success = true;
+    return result;
 }
 
 bool SQLiteConnection::hasTransaction(uint32_t txId) const {

@@ -17,6 +17,12 @@ AndroidDispatcher::AndroidDispatcher(unsigned int nThreads)
 
 AndroidDispatcher::~AndroidDispatcher()
 {
+    // Before the fd is closed: a worker signals eventFd_ after its task, and
+    // pool_ (a member, so destroyed only after this body) would otherwise still
+    // be running one — writing to a descriptor number the process has since
+    // handed to something else.
+    pool_.shutdown();
+
     if (looper_ && eventFd_ >= 0) {
         ALooper_removeFd(looper_, eventFd_);
     }

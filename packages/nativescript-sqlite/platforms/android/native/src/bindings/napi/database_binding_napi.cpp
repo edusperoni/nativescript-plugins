@@ -33,13 +33,25 @@ namespace NSCSQLite
             std::unordered_set<DBInstance *> live;
         };
 
-        // Pooled mode: every connection is SQLITE_OPEN_NOMUTEX because it is accessed
-        // by exactly one thread at a time.  WAL mode (set on the writer) lets readers
+        // Nesting one synchronous transaction inside another cannot work: the
+        // BEGIN would be a nested BEGIN.  MISUSE rather than the BUSY safeguard,
+        // which is about an open ASYNCHRONOUS transaction.
+        constexpr const char *kSyncTransactionActiveMessage =
+            "a synchronous transaction is already active on this database";
+
+        // The BUSY safeguard: a statement issued with db.executeSync() while an
+        // asynchronous transaction is open would silently become part of it.
+        constexpr const char *kTransactionActiveMessage =
+            "a transaction is active on this database; use the transaction object's "
+            "executeSync, or pass { joinTransaction: true } to run inside it";
+
+        // Every connection is SQLITE_OPEN_NOMUTEX: each one belongs to a dispatcher,
+        // and that dispatcher is what serializes the worker thread and the env's
+        // thread against each other.  WAL mode (set on the writer) lets readers
         // proceed without blocking writes and writes proceed without blocking readers.
         //
-        // Serialized mode: readerDbs/readerDispatchers/syncDb stay empty and writerDb
-        // — opened SQLITE_OPEN_FULLMUTEX — serves the dispatcher thread and the JS
-        // thread alike, SQLite's own locking making that concurrency safe.
+        // Serialized mode: readerDbs/readerDispatchers stay empty and the writer
+        // serves reads too.
         struct DBInstance
         {
             std::unique_ptr<SQLiteConnection> writerDb;
@@ -49,15 +61,47 @@ namespace NSCSQLite
             std::vector<std::unique_ptr<NapiDispatcher>> readerDispatchers;
             std::atomic<int> readerIndex{0};
 
-            std::unique_ptr<SQLiteConnection> syncDb;
-
             EnvState *state{nullptr};
 
-            SQLiteConnection *syncConnection() const
-            {
-                return syncDb ? syncDb.get() : writerDb.get();
-            }
+            // ── Open bookkeeping — env thread only ───────────────────────────
+            // Connections whose open task has not reported back yet, and the
+            // initialized() promises waiting for that to reach zero.
+            int openPending{0};
+            std::vector<napi_deferred> initWaiters;
+
+            // The first open that failed, in writer-then-reader order, as its own
+            // completion reported it. Asking the connections afterwards would
+            // race the close() a teardown may already have started on them.
+            int openFailedOrder{-1};
+            QueryResult openError{};
+
+            // ── Synchronous transaction span — env thread only ───────────────
+            // Set between beginTransactionSync() and endTransactionSync(), while
+            // this instance holds the writer dispatcher's inline claim.
+            bool syncSpanHeld{false};
+            uint32_t syncTxId{0};
         };
+
+        // Ends the synchronous transaction span this instance holds: the
+        // transaction first, then the claim.  Dropping the claim with the
+        // transaction still open would let the work queued behind the span run
+        // inside a transaction that nobody is going to commit.
+        // Re-entrant: the caller is the thread that holds the claim.
+        static QueryResult ReleaseSyncSpan(DBInstance *instance, bool commit)
+        {
+            uint32_t txId = instance->syncTxId;
+            SQLiteConnection *wdb = instance->writerDb.get();
+            QueryResult res;
+            instance->writerDispatcher->runInline([&]()
+                                                  {
+                if (!wdb->isOpen()) { res = wdb->unavailableError(); return; }
+                res = commit ? wdb->commitTransaction(txId) : wdb->rollbackTransaction(txId); });
+
+            instance->syncSpanHeld = false;
+            instance->syncTxId = 0;
+            instance->writerDispatcher->releaseInline();
+            return res;
+        }
 
         // Closes every connection on its own dispatcher and frees the instance
         // once all of them are done.  deferred is null on the finalizer path.
@@ -75,9 +119,11 @@ namespace NSCSQLite
         {
             instance->state->live.erase(instance);
 
-            // Sync connection is JS-thread-only; close it immediately.
-            if (instance->syncDb)
-                instance->syncDb->close();
+            // A span left open — close() called from inside a transactionSync
+            // callback — would keep the writer claimed, so the close below could
+            // never run and the dispatcher could never be joined.
+            if (instance->syncSpanHeld)
+                ReleaseSyncSpan(instance, /*commit*/ false);
 
             // SQLite only checkpoints and unlinks the -wal when the closing
             // connection can take an exclusive lock on the database file, which
@@ -341,6 +387,51 @@ namespace NSCSQLite
 
         //  Construction / teardown
 
+        static void SettleInitialized(DBInstance *instance, napi_deferred deferred)
+        {
+            if (instance->openFailedOrder < 0)
+            {
+                instance->state->adapter.resolveVoid(deferred);
+                return;
+            }
+            instance->state->adapter.reject(deferred, instance->openError.error, instance->openError.errorCode);
+        }
+
+        // Runs on the env's thread, from an open task's completion. `order` is the
+        // connection's place in writer-then-reader order, so that the failure
+        // reported is the first one regardless of which open finishes first.
+        static void NoteOpenFinished(DBInstance *instance, int order, const QueryResult &result)
+        {
+            if (!result.success && (instance->openFailedOrder < 0 || order < instance->openFailedOrder))
+            {
+                instance->openFailedOrder = order;
+                instance->openError = result;
+            }
+
+            if (--instance->openPending > 0)
+                return;
+
+            auto waiters = std::move(instance->initWaiters);
+            instance->initWaiters.clear();
+            for (napi_deferred waiter : waiters)
+                SettleInitialized(instance, waiter);
+        }
+
+        // Opens a connection on its own dispatcher thread, so that deriving an
+        // encryption key never runs on the env's thread.
+        static void DispatchOpen(DBInstance *instance, NapiDispatcher *dispatcher,
+                                 SQLiteConnection *conn, OpenOptions opts, int order)
+        {
+            ++instance->openPending;
+            auto result = std::make_shared<QueryResult>();
+            dispatcher->dispatch([conn, opts = std::move(opts), result]()
+                                 {
+                if (conn->open(opts)) result->success = true;
+                else *result = conn->unavailableError(); },
+                                 [instance, result, order]()
+                                 { NoteOpenFinished(instance, order, *result); });
+        }
+
         static napi_value Construct(napi_env env, napi_callback_info info)
         {
             Call call;
@@ -366,6 +457,7 @@ namespace NSCSQLite
             OpenOptions opts;
             opts.path = StringArg(env, call.argv[0]);
             bool serialized = false;
+            bool asyncOpen = false;
 
             napi_valuetype optionsType = napi_undefined;
             if (napi_typeof(env, call.argv[1], &optionsType) == napi_ok && optionsType == napi_object)
@@ -425,6 +517,12 @@ namespace NSCSQLite
                 {
                     napi_get_value_bool(env, value, &serialized);
                 }
+
+                if (napi_get_named_property(env, options, "asyncOpen", &value) == napi_ok &&
+                    napi_typeof(env, value, &valueType) == napi_ok && valueType == napi_boolean)
+                {
+                    napi_get_value_bool(env, value, &asyncOpen);
+                }
             }
 
             int poolSize = opts.poolSize > 0 ? opts.poolSize : 4;
@@ -434,50 +532,32 @@ namespace NSCSQLite
             auto instance = std::make_unique<DBInstance>();
             instance->state = state;
 
-            // Serialized: FULLMUTEX, because the JS thread runs the sync methods
-            // straight on this connection while the dispatcher thread uses it too.
-            // Pooled: NOMUTEX, exclusively owned by the writer thread.
             OpenOptions writerOpts = opts;
-            writerOpts.noMutex = !serialized;
+            writerOpts.noMutex = true;
             writerOpts.journalWAL = !opts.readOnly;
-            instance->writerDb = std::make_unique<SQLiteConnection>(writerOpts);
-            if (!instance->writerDb->isOpen())
+
+            instance->writerDb = std::make_unique<SQLiteConnection>();
+            instance->writerDispatcher = std::make_unique<NapiDispatcher>(state->completions, 1);
+
+            // Opening the writer here is what lets a bad path, a wrong key or a
+            // failing onOpen throw out of the constructor.  asyncOpen trades that
+            // away for a constructor that never blocks.
+            if (!asyncOpen && !instance->writerDb->open(writerOpts))
             {
                 ThrowSQLiteError(env, instance->writerDb->lastError(), instance->writerDb->lastCode());
                 return nullptr;
             }
-            instance->writerDispatcher = std::make_unique<NapiDispatcher>(state->completions, 1);
 
             if (!serialized)
             {
-                // Readers (NOMUTEX + query_only, one dedicated thread each)
-                // Open as READWRITE so each connection can initialise WAL shared memory;
+                // Readers (query_only, one dedicated thread each).
+                // Opened as READWRITE so each connection can initialise WAL shared memory;
                 // PRAGMA query_only=ON prevents accidental writes through reader connections.
                 for (int i = 0; i < poolSize; ++i)
                 {
-                    OpenOptions readerOpts = opts;
-                    readerOpts.noMutex = true;
-                    readerOpts.queryOnly = !opts.readOnly;
-                    auto readerDb = std::make_unique<SQLiteConnection>(readerOpts);
-                    if (!readerDb->isOpen())
-                    {
-                        ThrowSQLiteError(env, readerDb->lastError(), readerDb->lastCode());
-                        return nullptr;
-                    }
-                    instance->readerDbs.push_back(std::move(readerDb));
+                    instance->readerDbs.push_back(std::make_unique<SQLiteConnection>());
                     instance->readerDispatchers.push_back(
                         std::make_unique<NapiDispatcher>(state->completions, 1));
-                }
-
-                // Sync connection (NOMUTEX, JS thread only)
-                OpenOptions syncOpts = opts;
-                syncOpts.noMutex = true;
-                syncOpts.journalWAL = !opts.readOnly;
-                instance->syncDb = std::make_unique<SQLiteConnection>(syncOpts);
-                if (!instance->syncDb->isOpen())
-                {
-                    ThrowSQLiteError(env, instance->syncDb->lastError(), instance->syncDb->lastCode());
-                    return nullptr;
                 }
             }
 
@@ -489,7 +569,50 @@ namespace NSCSQLite
             }
             state->live.insert(raw);
             instance.release();
+
+            // Only now: an open task posts a completion that holds the instance,
+            // so nothing may be dispatched while a failure above can still return
+            // and destroy it.
+            if (asyncOpen)
+                DispatchOpen(raw, raw->writerDispatcher.get(), raw->writerDb.get(), std::move(writerOpts), 0);
+
+            for (size_t i = 0; i < raw->readerDbs.size(); ++i)
+            {
+                OpenOptions readerOpts = opts;
+                readerOpts.noMutex = true;
+                readerOpts.queryOnly = !opts.readOnly;
+                DispatchOpen(raw, raw->readerDispatchers[i].get(), raw->readerDbs[i].get(),
+                             std::move(readerOpts), static_cast<int>(i) + 1);
+            }
+
             return call.self;
+        }
+
+        // Resolves once every connection is open; rejects with the first open
+        // failure.  The promise is created per call, so an open that fails with
+        // nobody asking can never surface as an unhandled rejection.
+        static napi_value Initialized(napi_env env, napi_callback_info info)
+        {
+            Call call;
+            if (!ReadCall(env, info, call))
+                return nullptr;
+            napi_value closed = nullptr;
+            DBInstance *instance = GetInstance(env, call.self, &closed);
+            if (!instance)
+                return closed;
+
+            napi_deferred deferred = nullptr;
+            napi_value promise = nullptr;
+            if (napi_create_promise(env, &deferred, &promise) != napi_ok)
+                return nullptr;
+
+            if (instance->openPending == 0)
+            {
+                SettleInitialized(instance, deferred);
+                return promise;
+            }
+            instance->initWaiters.push_back(deferred);
+            return promise;
         }
 
         static napi_value Close(napi_env env, napi_callback_info info)
@@ -524,7 +647,7 @@ namespace NSCSQLite
         // Capturing `instance` raw is safe: Close() frees it only from the last
         // completion, which is queued behind everything dispatched before it.
         template <typename F1, typename F2>
-        static napi_value Dispatch(NapiDispatcher &dispatcher, DBInstance *instance,
+        static napi_value Dispatch(NapiDispatcher &dispatcher, SQLiteConnection *db, DBInstance *instance,
                                    napi_env env, F1 work, F2 completion)
         {
             napi_deferred deferred = nullptr;
@@ -535,9 +658,12 @@ namespace NSCSQLite
             auto resultPtr = std::make_shared<QueryResult>();
 
             dispatcher.dispatch(
-                [work = std::move(work), resultPtr]() mutable
+                [db, work = std::move(work), resultPtr]() mutable
                 {
-                    *resultPtr = work();
+                    // Queued behind this connection's open task, so one that is
+                    // still not open here is one whose open failed.  A reader
+                    // never falls back to another connection.
+                    *resultPtr = db->isOpen() ? work() : db->unavailableError();
                 },
                 [instance, deferred, completion = std::move(completion), resultPtr]()
                 {
@@ -565,6 +691,19 @@ namespace NSCSQLite
             return {instance->readerDispatchers[idx].get(), instance->readerDbs[idx].get()};
         }
 
+        // Runs fn on the writer connection from the env's thread: inline when the
+        // writer is idle, otherwise behind everything already queued on it.
+        // Blocks until the writer's open has finished if it is still in flight.
+        template <typename F>
+        static QueryResult RunOnWriter(DBInstance *instance, F &&fn)
+        {
+            SQLiteConnection *wdb = instance->writerDb.get();
+            QueryResult res;
+            instance->writerDispatcher->runInline([&]()
+                                                  { res = wdb->isOpen() ? fn(wdb) : wdb->unavailableError(); });
+            return res;
+        }
+
         //  Async methods
 
         static napi_value AsyncExecute(napi_env env, napi_callback_info info)
@@ -581,7 +720,7 @@ namespace NSCSQLite
             ParamList params = ParseParams(env, call.argv[1]);
 
             SQLiteConnection *wdb = instance->writerDb.get();
-            return Dispatch(*instance->writerDispatcher, instance, env, [wdb, sql, params = std::move(params)]() -> QueryResult
+            return Dispatch(*instance->writerDispatcher, wdb, instance, env, [wdb, sql, params = std::move(params)]() -> QueryResult
                             { return wdb->execute(sql, params); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &)
                             { inst->state->adapter.resolveVoid(deferred); });
         }
@@ -601,7 +740,7 @@ namespace NSCSQLite
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
-            return Dispatch(*reader.first, instance, env, [rdb, sql, params = std::move(params)]() -> QueryResult
+            return Dispatch(*reader.first, rdb, instance, env, [rdb, sql, params = std::move(params)]() -> QueryResult
                             { return rdb->executeJson(sql, params); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &res)
                             { inst->state->adapter.resolveWithRows(deferred, res); });
         }
@@ -621,7 +760,7 @@ namespace NSCSQLite
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
-            return Dispatch(*reader.first, instance, env, [rdb, sql, params = std::move(params)]() -> QueryResult
+            return Dispatch(*reader.first, rdb, instance, env, [rdb, sql, params = std::move(params)]() -> QueryResult
                             { return rdb->executeArrayJson(sql, params); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &res)
                             { inst->state->adapter.resolveWithArrayResult(deferred, res); });
         }
@@ -641,7 +780,7 @@ namespace NSCSQLite
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
-            return Dispatch(*reader.first, instance, env, [rdb, sql, params = std::move(params)]() -> QueryResult
+            return Dispatch(*reader.first, rdb, instance, env, [rdb, sql, params = std::move(params)]() -> QueryResult
                             { return rdb->executeGetJson(sql, params); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &res)
                             { inst->state->adapter.resolveWithFirstRow(deferred, res); });
         }
@@ -661,7 +800,7 @@ namespace NSCSQLite
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
-            return Dispatch(*reader.first, instance, env, [rdb, sql, params = std::move(params)]() -> QueryResult
+            return Dispatch(*reader.first, rdb, instance, env, [rdb, sql, params = std::move(params)]() -> QueryResult
                             { return rdb->executeGetArrayJson(sql, params); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &res)
                             { inst->state->adapter.resolveWithFirstArrayRow(deferred, res); });
         }
@@ -677,10 +816,30 @@ namespace NSCSQLite
             if (!instance)
                 return nullptr;
 
+            // call.argv[2] is joinTransaction: the caller saying the statement is
+            // meant to become part of the open transaction.
+            bool joinTransaction = false;
+            napi_valuetype joinType = napi_undefined;
+            if (napi_typeof(env, call.argv[2], &joinType) == napi_ok && joinType == napi_boolean)
+                napi_get_value_bool(env, call.argv[2], &joinTransaction);
+
             std::string sql = StringArg(env, call.argv[0]);
             ParamList params = ParseParams(env, call.argv[1]);
 
-            QueryResult res = instance->syncConnection()->execute(sql, params);
+            // Read under the claim, not before it: a beginTransaction already
+            // dispatched but not yet run would pass a check made out here, and
+            // this statement would then silently join the transaction it opens.
+            bool blocked = false;
+            QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db) -> QueryResult
+                                          {
+                if (!joinTransaction && db->hasActiveAsyncTransaction()) { blocked = true; return QueryResult{}; }
+                return db->execute(sql, params); });
+
+            if (blocked)
+            {
+                ThrowSQLiteError(env, kTransactionActiveMessage, SQLITE_BUSY);
+                return nullptr;
+            }
             if (!res.success)
             {
                 ThrowSQLiteError(env, res.error, res.errorCode);
@@ -704,7 +863,8 @@ namespace NSCSQLite
             std::string sql = StringArg(env, call.argv[0]);
             ParamList params = ParseParams(env, call.argv[1]);
 
-            QueryResult res = instance->syncConnection()->execute(sql, params);
+            QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
+                                          { return db->execute(sql, params); });
             if (!res.success)
             {
                 ThrowSQLiteError(env, res.error, res.errorCode);
@@ -728,7 +888,8 @@ namespace NSCSQLite
             std::string sql = StringArg(env, call.argv[0]);
             ParamList params = ParseParams(env, call.argv[1]);
 
-            QueryResult res = instance->syncConnection()->execute(sql, params);
+            QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
+                                          { return db->execute(sql, params); });
             if (!res.success)
             {
                 ThrowSQLiteError(env, res.error, res.errorCode);
@@ -752,7 +913,8 @@ namespace NSCSQLite
             std::string sql = StringArg(env, call.argv[0]);
             ParamList params = ParseParams(env, call.argv[1]);
 
-            QueryResult res = instance->syncConnection()->executeGet(sql, params);
+            QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
+                                          { return db->executeGet(sql, params); });
             if (!res.success)
             {
                 ThrowSQLiteError(env, res.error, res.errorCode);
@@ -776,7 +938,8 @@ namespace NSCSQLite
             std::string sql = StringArg(env, call.argv[0]);
             ParamList params = ParseParams(env, call.argv[1]);
 
-            QueryResult res = instance->syncConnection()->executeGet(sql, params);
+            QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
+                                          { return db->executeGet(sql, params); });
             if (!res.success)
             {
                 ThrowSQLiteError(env, res.error, res.errorCode);
@@ -785,6 +948,183 @@ namespace NSCSQLite
 
             NapiReturn out{env, nullptr};
             instance->state->adapter.returnFirstArrayRow(&out, res);
+            return out.value;
+        }
+
+        //  Synchronous transactions
+        //
+        //  These run on the connection that owns txId — today always the writer —
+        //  and are the sanctioned way to work inside an open transaction, so the
+        //  BUSY safeguard above never applies to them.
+
+        static napi_value SyncExecuteInTransaction(napi_env env, napi_callback_info info)
+        {
+            Call call;
+            if (!ReadCall(env, info, call))
+                return nullptr;
+            DBInstance *instance = GetInstance(env, call.self, nullptr);
+            if (!instance)
+                return nullptr;
+
+            uint32_t txId = Uint32Arg(env, call.argv[0]);
+            std::string sql = StringArg(env, call.argv[1]);
+            ParamList params = ParseParams(env, call.argv[2]);
+
+            QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
+                                          { return db->executeInTransaction(txId, sql, params); });
+            if (!res.success)
+            {
+                ThrowSQLiteError(env, res.error, res.errorCode);
+                return nullptr;
+            }
+
+            NapiReturn out{env, nullptr};
+            instance->state->adapter.returnVoid(&out);
+            return out.value;
+        }
+
+        static napi_value SyncSelectInTransaction(napi_env env, napi_callback_info info)
+        {
+            Call call;
+            if (!ReadCall(env, info, call))
+                return nullptr;
+            DBInstance *instance = GetInstance(env, call.self, nullptr);
+            if (!instance)
+                return nullptr;
+
+            uint32_t txId = Uint32Arg(env, call.argv[0]);
+            std::string sql = StringArg(env, call.argv[1]);
+            ParamList params = ParseParams(env, call.argv[2]);
+
+            // Mode: 1=select, 2=selectArray — the async selectInTransaction's convention.
+            int mode = Int32Arg(env, call.argv[3], 1);
+
+            QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
+                                          { return db->selectInTransaction(txId, sql, params); });
+            if (!res.success)
+            {
+                ThrowSQLiteError(env, res.error, res.errorCode);
+                return nullptr;
+            }
+
+            NapiReturn out{env, nullptr};
+            if (mode == 2)
+                instance->state->adapter.returnArrayResult(&out, res);
+            else
+                instance->state->adapter.returnRows(&out, res);
+            return out.value;
+        }
+
+        // Claims the writer for the whole transaction, so nothing dispatched
+        // asynchronously — queued before this call or started from inside the
+        // callback — can run between the BEGIN and endTransactionSync().
+        static napi_value SyncBeginTransaction(napi_env env, napi_callback_info info)
+        {
+            Call call;
+            if (!ReadCall(env, info, call))
+                return nullptr;
+            DBInstance *instance = GetInstance(env, call.self, nullptr);
+            if (!instance)
+                return nullptr;
+
+            // Checked before anything is claimed, so the span already open is
+            // left exactly as it was.
+            if (instance->syncSpanHeld)
+            {
+                ThrowSQLiteError(env, kSyncTransactionActiveMessage, SQLITE_MISUSE);
+                return nullptr;
+            }
+
+            TxBehavior behavior = TxBehavior::Deferred;
+            napi_valuetype type = napi_undefined;
+            if (napi_typeof(env, call.argv[0], &type) == napi_ok && type == napi_string)
+            {
+                std::string b = StringArg(env, call.argv[0]);
+                if (b == "immediate")
+                    behavior = TxBehavior::Immediate;
+                else if (b == "exclusive")
+                    behavior = TxBehavior::Exclusive;
+            }
+
+            if (instance->writerDb->hasActiveAsyncTransaction())
+            {
+                ThrowSQLiteError(env, kTransactionActiveMessage, SQLITE_BUSY);
+                return nullptr;
+            }
+
+            instance->writerDispatcher->acquireInline();
+
+            // An asynchronous beginTransaction queued ahead of this call has run
+            // by now, so the check above is only authoritative here.
+            if (instance->writerDb->hasActiveAsyncTransaction())
+            {
+                instance->writerDispatcher->releaseInline();
+                ThrowSQLiteError(env, kTransactionActiveMessage, SQLITE_BUSY);
+                return nullptr;
+            }
+
+            SQLiteConnection *wdb = instance->writerDb.get();
+            uint32_t txId = 0;
+            QueryResult err;
+            instance->writerDispatcher->runInline([&]()
+                                                  {
+                if (!wdb->isOpen()) { err = wdb->unavailableError(); return; }
+                txId = wdb->beginTransaction(behavior, /*syncSpan*/ true);
+                if (txId == 0) err = wdb->errorResult(); });
+
+            if (txId == 0)
+            {
+                instance->writerDispatcher->releaseInline();
+                ThrowSQLiteError(env, err.error, err.errorCode);
+                return nullptr;
+            }
+
+            instance->syncSpanHeld = true;
+            instance->syncTxId = txId;
+
+            napi_value result = nullptr;
+            napi_create_uint32(env, txId, &result);
+            return result;
+        }
+
+        // Ends the span opened by beginTransactionSync and always releases the
+        // writer, including on a failing COMMIT or a mismatched id — a claim that
+        // leaks would wedge every later call on this database.
+        static napi_value SyncEndTransaction(napi_env env, napi_callback_info info)
+        {
+            Call call;
+            if (!ReadCall(env, info, call))
+                return nullptr;
+            DBInstance *instance = GetInstance(env, call.self, nullptr);
+            if (!instance)
+                return nullptr;
+
+            uint32_t txId = Uint32Arg(env, call.argv[0]);
+            bool commit = false;
+            napi_valuetype type = napi_undefined;
+            if (napi_typeof(env, call.argv[1], &type) == napi_ok && type == napi_boolean)
+                napi_get_value_bool(env, call.argv[1], &commit);
+
+            if (!instance->syncSpanHeld || txId != instance->syncTxId)
+            {
+                // The span still has to end even though the id is wrong: the
+                // caller pairs this with beginTransactionSync exactly once, so
+                // there is no second call coming to end it.
+                if (instance->syncSpanHeld)
+                    ReleaseSyncSpan(instance, /*commit*/ false);
+                ThrowSQLiteError(env, "invalid transaction id " + std::to_string(txId), SQLITE_MISUSE);
+                return nullptr;
+            }
+
+            QueryResult res = ReleaseSyncSpan(instance, commit);
+            if (!res.success)
+            {
+                ThrowSQLiteError(env, res.error, res.errorCode);
+                return nullptr;
+            }
+
+            NapiReturn out{env, nullptr};
+            instance->state->adapter.returnVoid(&out);
             return out.value;
         }
 
@@ -803,7 +1143,7 @@ namespace NSCSQLite
             std::string sql = StringArg(env, call.argv[0]);
 
             SQLiteConnection *wdb = instance->writerDb.get();
-            return Dispatch(*instance->writerDispatcher, instance, env, [wdb, sql]() -> QueryResult
+            return Dispatch(*instance->writerDispatcher, wdb, instance, env, [wdb, sql]() -> QueryResult
                             {
             uint32_t stmtId = wdb->prepareStatement(sql);
             QueryResult res;
@@ -834,7 +1174,7 @@ namespace NSCSQLite
             int mode = Int32Arg(env, call.argv[2], 0);
 
             SQLiteConnection *wdb = instance->writerDb.get();
-            return Dispatch(*instance->writerDispatcher, instance, env, [wdb, stmtId, params = std::move(params), mode]() -> QueryResult
+            return Dispatch(*instance->writerDispatcher, wdb, instance, env, [wdb, stmtId, params = std::move(params), mode]() -> QueryResult
                             {
             if (mode == 1) return wdb->stepStatementJson(stmtId, params, false);
             if (mode == 2) return wdb->stepStatementArrayJson(stmtId, params, false);
@@ -862,7 +1202,7 @@ namespace NSCSQLite
             uint32_t stmtId = Uint32Arg(env, call.argv[0]);
 
             SQLiteConnection *wdb = instance->writerDb.get();
-            return Dispatch(*instance->writerDispatcher, instance, env, [wdb, stmtId]() -> QueryResult
+            return Dispatch(*instance->writerDispatcher, wdb, instance, env, [wdb, stmtId]() -> QueryResult
                             {
             wdb->finalizeStatement(stmtId);
             QueryResult res;
@@ -895,7 +1235,7 @@ namespace NSCSQLite
             }
 
             SQLiteConnection *wdb = instance->writerDb.get();
-            return Dispatch(*instance->writerDispatcher, instance, env, [wdb, behavior]() -> QueryResult
+            return Dispatch(*instance->writerDispatcher, wdb, instance, env, [wdb, behavior]() -> QueryResult
                             {
             uint32_t txId = wdb->beginTransaction(behavior);
             QueryResult res;
@@ -922,12 +1262,8 @@ namespace NSCSQLite
             uint32_t txId = Uint32Arg(env, call.argv[0]);
 
             SQLiteConnection *wdb = instance->writerDb.get();
-            return Dispatch(*instance->writerDispatcher, instance, env, [wdb, txId]() -> QueryResult
-                            {
-            wdb->commitTransaction(txId);
-            QueryResult res;
-            res.success = true;
-            return res; }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &)
+            return Dispatch(*instance->writerDispatcher, wdb, instance, env, [wdb, txId]() -> QueryResult
+                            { return wdb->commitTransaction(txId); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &)
                             { inst->state->adapter.resolveVoid(deferred); });
         }
 
@@ -944,12 +1280,8 @@ namespace NSCSQLite
             uint32_t txId = Uint32Arg(env, call.argv[0]);
 
             SQLiteConnection *wdb = instance->writerDb.get();
-            return Dispatch(*instance->writerDispatcher, instance, env, [wdb, txId]() -> QueryResult
-                            {
-            wdb->rollbackTransaction(txId);
-            QueryResult res;
-            res.success = true;
-            return res; }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &)
+            return Dispatch(*instance->writerDispatcher, wdb, instance, env, [wdb, txId]() -> QueryResult
+                            { return wdb->rollbackTransaction(txId); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &)
                             { inst->state->adapter.resolveVoid(deferred); });
         }
 
@@ -968,7 +1300,7 @@ namespace NSCSQLite
             ParamList params = ParseParams(env, call.argv[2]);
 
             SQLiteConnection *wdb = instance->writerDb.get();
-            return Dispatch(*instance->writerDispatcher, instance, env, [wdb, txId, sql, params = std::move(params)]() -> QueryResult
+            return Dispatch(*instance->writerDispatcher, wdb, instance, env, [wdb, txId, sql, params = std::move(params)]() -> QueryResult
                             { return wdb->executeInTransaction(txId, sql, params); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &)
                             { inst->state->adapter.resolveVoid(deferred); });
         }
@@ -991,7 +1323,7 @@ namespace NSCSQLite
             int mode = Int32Arg(env, call.argv[3], 1);
 
             SQLiteConnection *wdb = instance->writerDb.get();
-            return Dispatch(*instance->writerDispatcher, instance, env, [wdb, txId, sql, params = std::move(params), mode]() -> QueryResult
+            return Dispatch(*instance->writerDispatcher, wdb, instance, env, [wdb, txId, sql, params = std::move(params), mode]() -> QueryResult
                             {
             if (mode == 2) return wdb->selectInTransactionArrayJson(txId, sql, params);
             return wdb->selectInTransactionJson(txId, sql, params); }, [mode](DBInstance *inst, napi_deferred deferred, const QueryResult &res)
@@ -1032,6 +1364,8 @@ namespace NSCSQLite
                 {"get", nullptr, AsyncGet, nullptr, nullptr, nullptr, napi_default_method, nullptr},
                 {"getArray", nullptr, AsyncGetArray, nullptr, nullptr, nullptr, napi_default_method, nullptr},
 
+                {"initialized", nullptr, Initialized, nullptr, nullptr, nullptr, napi_default_method, nullptr},
+
                 {"executeSync", nullptr, SyncExecute, nullptr, nullptr, nullptr, napi_default_method, nullptr},
                 {"selectSync", nullptr, SyncSelect, nullptr, nullptr, nullptr, napi_default_method, nullptr},
                 {"selectArraySync", nullptr, SyncSelectArray, nullptr, nullptr, nullptr, napi_default_method, nullptr},
@@ -1047,6 +1381,11 @@ namespace NSCSQLite
                 {"rollbackTransaction", nullptr, RollbackTransaction, nullptr, nullptr, nullptr, napi_default_method, nullptr},
                 {"executeInTransaction", nullptr, ExecuteInTransaction, nullptr, nullptr, nullptr, napi_default_method, nullptr},
                 {"selectInTransaction", nullptr, SelectInTransaction, nullptr, nullptr, nullptr, napi_default_method, nullptr},
+
+                {"beginTransactionSync", nullptr, SyncBeginTransaction, nullptr, nullptr, nullptr, napi_default_method, nullptr},
+                {"endTransactionSync", nullptr, SyncEndTransaction, nullptr, nullptr, nullptr, napi_default_method, nullptr},
+                {"executeInTransactionSync", nullptr, SyncExecuteInTransaction, nullptr, nullptr, nullptr, napi_default_method, nullptr},
+                {"selectInTransactionSync", nullptr, SyncSelectInTransaction, nullptr, nullptr, nullptr, napi_default_method, nullptr},
 
                 {"getRuntimeInfo", nullptr, GetRuntimeInfo, nullptr, nullptr, nullptr, napi_default_method, nullptr},
             };

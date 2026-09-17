@@ -45,6 +45,14 @@ public:
     void dispatch(std::function<void()> work,
                   std::function<void()> completion);
 
+    // ── Run work from the runtime thread itself (the synchronous API) ─────
+    // Mutually exclusive with dispatched work and ordered behind it; inline on
+    // the calling thread when this dispatcher is idle. acquire/release hold
+    // that claim across several calls. See ThreadPool for the invariants.
+    void runInline(FnRef fn)  { pool_.runInline(fn); }
+    void acquireInline()      { pool_.acquireInline(); }
+    void releaseInline()      { pool_.releaseInline(); }
+
 private:
     static int looperCallback(int fd, int events, void* data);
     void drainCompletions();
