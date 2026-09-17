@@ -9,7 +9,7 @@ def prop = { String name, String env, String fallback = null ->
     (value == null || value.isEmpty()) ? fallback : value
 }
 
-def backend = prop('nscsqlite.backend', 'NSCSQLITE_BACKEND', 'v8')
+def backend = prop('nscsqlite.backend', 'NSCSQLITE_BACKEND', 'napi')
 
 if (backend != 'v8' && backend != 'napi') {
     throw new GradleException("nscsqlite.backend must be 'v8' or 'napi', got '${backend}'")

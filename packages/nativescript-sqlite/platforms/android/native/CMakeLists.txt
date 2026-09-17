@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Runtime binding backend: "v8" binds through the raw V8 C++ API, "napi" through
 # Node-API.  The two are mutually exclusive and produce the same library name.
 if(NOT DEFINED NSCSQLITE_BACKEND OR NSCSQLITE_BACKEND STREQUAL "")
-    set(NSCSQLITE_BACKEND "v8")
+    set(NSCSQLITE_BACKEND "napi")
 endif()
 
 if(NOT NSCSQLITE_BACKEND STREQUAL "v8" AND NOT NSCSQLITE_BACKEND STREQUAL "napi")
