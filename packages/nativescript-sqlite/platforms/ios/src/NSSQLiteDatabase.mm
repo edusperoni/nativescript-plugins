@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <atomic>
+#include <thread>
 #include <cstring>
 
 // MARK: - Open Failure
@@ -16,14 +17,9 @@ struct OpenFailure {
     std::string message;
 };
 
-/// NativeScript turns this into a JS exception, with the NSException reachable
-/// as `nativeException` — so the SQLite codes ride along in userInfo.
-static void raiseOpenFailure(const OpenFailure &failure) __attribute__((noreturn));
-static void raiseOpenFailure(const OpenFailure &failure) {
-    @throw [NSException exceptionWithName:@"NSSQLiteOpenError"
-                                   reason:[NSString stringWithUTF8String:failure.message.c_str()]
-                                 userInfo:@{@"code": @(failure.code), @"extendedCode": @(failure.extendedCode)}];
-}
+/// sqlite3_extended_result_codes is on for every connection, so the codes SQLite
+/// hands back are already extended; the primary code is their low byte.
+static inline int primaryCode(int code) { return code & 0xFF; }
 
 // MARK: - Encryption Key
 
@@ -105,7 +101,8 @@ public:
     }
 
     void appendBlobPlaceholder(int index) {
-        buf_.append("{\"__blob__\":", 11);
+        static const char prefix[] = "{\"__blob__\":";
+        buf_.append(prefix, sizeof(prefix) - 1);
         appendInt(index);
         buf_.push_back('}');
     }
@@ -116,6 +113,8 @@ public:
 class SQLiteConnection {
     sqlite3 *db_ = nullptr;
     std::string path_;
+    OpenFailure failure_;
+    bool failed_ = false;
 
 public:
     SQLiteConnection() = default;
@@ -126,12 +125,35 @@ public:
 
     sqlite3 *handle() const { return db_; }
 
+    /**
+     * Non-null while the connection could not be opened. Every error the
+     * connection reports then describes that failure instead of the missing
+     * handle, so work routed to a connection that never opened — a pooled
+     * reader, or anything at all under asyncOpen — says why.
+     */
+    const OpenFailure *openFailure() const { return failed_ ? &failure_ : nullptr; }
+
+    void recordOpenFailure(const OpenFailure &failure) {
+        failure_ = failure;
+        failed_ = true;
+    }
+
     bool open(const std::string &path, int flags, int busyTimeoutMs, const std::string &encryptionKey, const std::vector<std::string> &onOpen, OpenFailure &outError) {
+        if (!openConnection(path, flags, busyTimeoutMs, encryptionKey, onOpen, outError)) {
+            recordOpenFailure(outError);
+            return false;
+        }
+        failed_ = false;
+        return true;
+    }
+
+private:
+    bool openConnection(const std::string &path, int flags, int busyTimeoutMs, const std::string &encryptionKey, const std::vector<std::string> &onOpen, OpenFailure &outError) {
         int rc = sqlite3_open_v2(path.c_str(), &db_, flags, nullptr);
         if (rc != SQLITE_OK) {
             // sqlite3_open_v2 still hands back a handle on most failures, and the
             // message only lives on that handle — so read it before closing.
-            outError.code = rc;
+            outError.code = primaryCode(rc);
             outError.extendedCode = db_ ? sqlite3_extended_errcode(db_) : rc;
             outError.message = db_ ? sqlite3_errmsg(db_) : "out of memory allocating the database handle";
             if (db_) { sqlite3_close(db_); db_ = nullptr; }
@@ -164,6 +186,7 @@ public:
         return true;
     }
 
+public:
     bool configureWAL(OpenFailure &outError) {
         return execPragma("PRAGMA journal_mode=WAL", outError);
     }
@@ -175,15 +198,19 @@ public:
         }
     }
 
-    int lastErrorCode() const { return db_ ? sqlite3_errcode(db_) : SQLITE_ERROR; }
-    int lastExtendedErrorCode() const { return db_ ? sqlite3_extended_errcode(db_) : SQLITE_ERROR; }
-    const char *lastErrorMsg() const { return db_ ? sqlite3_errmsg(db_) : "Database not open"; }
+    int lastErrorCode() const { return failed_ ? failure_.code : (db_ ? primaryCode(sqlite3_errcode(db_)) : SQLITE_ERROR); }
+    int lastExtendedErrorCode() const { return failed_ ? failure_.extendedCode : (db_ ? sqlite3_extended_errcode(db_) : SQLITE_ERROR); }
+    const char *lastErrorMsg() const { return failed_ ? failure_.message.c_str() : (db_ ? sqlite3_errmsg(db_) : "Database not open"); }
 
     bool execute(const char *sql, std::string &outError) {
+        if (failed_) {
+            outError = failure_.message;
+            return false;
+        }
         char *errMsg = nullptr;
         int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &errMsg);
         if (rc != SQLITE_OK) {
-            outError = errMsg ? errMsg : sqlite3_errmsg(db_);
+            outError = errMsg ? errMsg : lastErrorMsg();
             if (errMsg) sqlite3_free(errMsg);
             return false;
         }
@@ -195,7 +222,7 @@ private:
         char *errMsg = nullptr;
         int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &errMsg);
         if (rc != SQLITE_OK) {
-            outError.code = rc;
+            outError.code = primaryCode(rc);
             outError.extendedCode = sqlite3_extended_errcode(db_);
             outError.message = errMsg ? errMsg : sqlite3_errmsg(db_);
             if (errMsg) sqlite3_free(errMsg);
@@ -501,13 +528,36 @@ struct ReadTxHandle {
     int readerIndex;
 };
 
+// MARK: - Sync Target
+
+/**
+ * Where a synchronous call runs. A nil queue means the calling thread already
+ * owns the connection — it holds a transactionSync span, which keeps the writer
+ * queue suspended — so the work runs inline; dispatching there would deadlock.
+ */
+struct SyncTarget {
+    SQLiteConnection *conn = nullptr;
+    dispatch_queue_t queue = nil;
+    bool valid = false;
+};
+
+static void runSync(const SyncTarget &target, dispatch_block_t block) {
+    if (target.queue) {
+        dispatch_sync(target.queue, block);
+    } else {
+        block();
+    }
+}
+
 // MARK: - NSSQLiteDatabase Implementation
+
+/// The wording every sync write sees while an asynchronous transaction is open.
+static const char *const kActiveWriteTxMessage =
+    "a transaction is active on this database; use the transaction object's executeSync, or pass { joinTransaction: true } to run inside it";
 
 @implementation NSSQLiteDatabase {
     SQLiteConnection _writerConn;
     std::vector<SQLiteConnection *> _readerConns;
-    SQLiteConnection _syncConn;
-    bool _syncConnOpened;
 
     dispatch_queue_t _writerQueue;
     std::vector<dispatch_queue_t> _readerQueues;
@@ -524,8 +574,18 @@ struct ReadTxHandle {
     std::atomic<int> _nextTxId;
     std::atomic<int> _nextStmtId;
 
+    std::mutex _initMutex;
+    int _pendingOpens;
+    NSError *_openError;
+    NSMutableArray *_initCompletions;
+    dispatch_group_t _writerOpenGroup;
+
     std::mutex _txMutex;
     bool _hasActiveWriteTx;
+    int _activeWriteTxId;
+    int _syncTxId;
+    bool _writerQueueSuspended;
+    std::thread::id _syncTxThread;
     std::vector<std::pair<std::string, void (^)(int, NSError *)>> _pendingTxStarts;
 
     std::mutex _stmtMutex;
@@ -542,19 +602,25 @@ struct ReadTxHandle {
                  busyTimeout:(int)busyTimeoutMs
                encryptionKey:(NSString *)encryptionKey
                       onOpen:(NSArray<NSString *> *)onOpen
-                  serialized:(BOOL)serialized {
+                  serialized:(BOOL)serialized
+                   asyncOpen:(BOOL)asyncOpen
+                       error:(NSError **)error {
     NSSQLiteDatabase *db = [[NSSQLiteDatabase alloc] init];
-    [db _openWithPath:path poolSize:poolSize readOnly:readOnly busyTimeout:busyTimeoutMs encryptionKey:encryptionKey onOpen:onOpen serialized:serialized];
+    if (![db _openWithPath:path poolSize:poolSize readOnly:readOnly busyTimeout:busyTimeoutMs encryptionKey:encryptionKey onOpen:onOpen serialized:serialized asyncOpen:asyncOpen error:error]) {
+        return nil;
+    }
     return db;
 }
 
-- (void)_openWithPath:(NSString *)path
+- (BOOL)_openWithPath:(NSString *)path
              poolSize:(int)poolSize
              readOnly:(BOOL)readOnly
           busyTimeout:(int)busyTimeoutMs
         encryptionKey:(NSString *)encryptionKey
                onOpen:(NSArray<NSString *> *)onOpen
-           serialized:(BOOL)serialized {
+           serialized:(BOOL)serialized
+            asyncOpen:(BOOL)asyncOpen
+                error:(NSError **)error {
     _serialized = serialized;
     _path = [path UTF8String];
     _busyTimeoutMs = busyTimeoutMs;
@@ -566,72 +632,146 @@ struct ReadTxHandle {
             _onOpen.emplace_back([sql UTF8String]);
         }
     }
-    _syncConnOpened = false;
     _readerIndex = 0;
     _nextTxId = 1;
     _nextStmtId = 1;
     _hasActiveWriteTx = false;
+    _activeWriteTxId = -1;
+    _syncTxId = -1;
+    _writerQueueSuspended = false;
 
-    std::string error;
-    OpenFailure failure;
-
-    // SQLITE_OPEN_URI is always safe to set: SQLite only applies URI parsing to
-    // filenames that begin with "file:" (e.g. "file:/db?vfs=memdb"); any other
-    // path — even one containing "?" — is treated as an ordinary filename.
-    int writerFlags = (readOnly
-        ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX)
-        : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX)) | SQLITE_OPEN_URI;
-
-    if (!_writerConn.open(_path, writerFlags, busyTimeoutMs, _encryptionKey, _onOpen, failure)) {
-        NSLog(@"[NSSQLiteDatabase] Failed to open writer: %s", failure.message.c_str());
-        raiseOpenFailure(failure);
-    }
-
-    // Enable WAL for read/write databases. For in-memory databases the pragma is
-    // a harmless no-op (journal mode stays "memory").
-    if (!readOnly) {
-        if (!_writerConn.configureWAL(failure)) {
-            NSLog(@"[NSSQLiteDatabase] Failed to enable WAL: %s", failure.message.c_str());
-            _writerConn.close();
-            raiseOpenFailure(failure);
-        }
-    }
+    if (poolSize < 1) poolSize = 1;
+    // Serialized mode: no reader pool. All reads, writes, transactions and sync
+    // operations run on the single writer connection via _writerQueue.
+    int readerCount = serialized ? 0 : poolSize;
+    _pendingOpens = 1 + readerCount;
 
     NSString *writerLabel = [NSString stringWithFormat:@"com.nssqlite.writer.%@", [path lastPathComponent]];
     _writerQueue = dispatch_queue_create([writerLabel UTF8String], DISPATCH_QUEUE_SERIAL);
 
-    if (poolSize < 1) poolSize = 1;
+    // Only the writer is opened with SQLITE_OPEN_CREATE, so a reader that starts
+    // first on a database that does not exist yet fails with SQLITE_CANTOPEN.
+    _writerOpenGroup = dispatch_group_create();
+    dispatch_group_enter(_writerOpenGroup);
 
-    // Serialized mode: no reader pool. All reads, writes, transactions and sync
-    // operations run on the single writer connection via _writerQueue.
-    if (serialized) {
-        _isOpen = YES;
-        return;
-    }
-
-    // Readers open as READWRITE so they can initialize WAL shared memory (SHM).
-    // READONLY connections cannot create/map the SHM file, which causes "unable to
-    // open database file" errors when the DB is already in WAL mode.
-    // PRAGMA query_only=ON prevents accidental writes through these connections.
-    for (int i = 0; i < poolSize; i++) {
-        auto *reader = new SQLiteConnection();
-        int readerFlags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI;
-        if (!reader->open(_path, readerFlags, busyTimeoutMs, _encryptionKey, _onOpen, failure)) {
-            NSLog(@"[NSSQLiteDatabase] Failed to open reader %d: %s", i, failure.message.c_str());
-            delete reader;
-            continue;
-        }
-        if (!readOnly) {
-            reader->execute("PRAGMA query_only=ON", error);
-        }
-        _readerConns.push_back(reader);
+    // Every slot exists before any open runs, so the open blocks and close can
+    // index into these vectors without them ever being resized underneath.
+    for (int i = 0; i < readerCount; i++) {
+        _readerConns.push_back(new SQLiteConnection());
         _readerAvailable.push_back(true);
-
         NSString *label = [NSString stringWithFormat:@"com.nssqlite.reader.%d.%@", i, [path lastPathComponent]];
         _readerQueues.push_back(dispatch_queue_create([label UTF8String], DISPATCH_QUEUE_SERIAL));
     }
 
     _isOpen = YES;
+
+    if (asyncOpen) {
+        dispatch_async(_writerQueue, ^{ [self _openWriter:nullptr]; });
+    } else {
+        OpenFailure failure;
+        if (![self _openWriter:&failure]) {
+            // Nothing has been dispatched yet, so the half-built database can be
+            // torn down here rather than left for -dealloc.
+            _isOpen = NO;
+            for (auto *reader : _readerConns) delete reader;
+            _readerConns.clear();
+            _readerQueues.clear();
+            _readerAvailable.clear();
+            if (error) *error = [self _errorFromOpenFailure:failure];
+            return NO;
+        }
+    }
+
+    for (int i = 0; i < readerCount; i++) {
+        dispatch_async(_readerQueues[i], ^{ [self _openReaderAtIndex:i]; });
+    }
+    return YES;
+}
+
+/// Opens the writer. Reports the failure through outFailure for the synchronous
+/// path; nullptr is the asyncOpen path, where only initializedWithCompletion:
+/// is left to report it.
+- (BOOL)_openWriter:(OpenFailure *)outFailure {
+    OpenFailure failure;
+
+    // SQLITE_OPEN_URI is always safe to set: SQLite only applies URI parsing to
+    // filenames that begin with "file:" (e.g. "file:/db?vfs=memdb"); any other
+    // path — even one containing "?" — is treated as an ordinary filename.
+    int flags = (_readOnly
+        ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX)
+        : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX)) | SQLITE_OPEN_URI;
+
+    BOOL ok = _writerConn.open(_path, flags, _busyTimeoutMs, _encryptionKey, _onOpen, failure);
+    if (!ok) {
+        NSLog(@"[NSSQLiteDatabase] Failed to open writer: %s", failure.message.c_str());
+    } else if (!_readOnly && !_writerConn.configureWAL(failure)) {
+        // Enable WAL for read/write databases. For in-memory databases the pragma
+        // is a harmless no-op (journal mode stays "memory").
+        NSLog(@"[NSSQLiteDatabase] Failed to enable WAL: %s", failure.message.c_str());
+        _writerConn.close();
+        _writerConn.recordOpenFailure(failure);
+        ok = NO;
+    }
+
+    if (!ok && outFailure) *outFailure = failure;
+    dispatch_group_leave(_writerOpenGroup);
+    [self _connectionOpenFinished:ok ? nil : [self _errorFromOpenFailure:failure]];
+    return ok;
+}
+
+- (void)_openReaderAtIndex:(int)index {
+    dispatch_group_wait(_writerOpenGroup, DISPATCH_TIME_FOREVER);
+    SQLiteConnection *reader = _readerConns[index];
+
+    // Readers open as READWRITE so they can initialize WAL shared memory (SHM).
+    // READONLY connections cannot create/map the SHM file, which causes "unable to
+    // open database file" errors when the DB is already in WAL mode.
+    // PRAGMA query_only=ON prevents accidental writes through these connections.
+    int flags = (_readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI;
+
+    OpenFailure failure;
+    if (!reader->open(_path, flags, _busyTimeoutMs, _encryptionKey, _onOpen, failure)) {
+        NSLog(@"[NSSQLiteDatabase] Failed to open reader %d: %s", index, failure.message.c_str());
+        [self _connectionOpenFinished:[self _errorFromOpenFailure:failure]];
+        return;
+    }
+    if (!_readOnly) {
+        std::string error;
+        reader->execute("PRAGMA query_only=ON", error);
+    }
+    [self _connectionOpenFinished:nil];
+}
+
+- (void)_connectionOpenFinished:(NSError *)error {
+    NSMutableArray *completions = nil;
+    NSError *result = nil;
+    {
+        std::lock_guard<std::mutex> lock(_initMutex);
+        if (error && !_openError) _openError = error;
+        if (--_pendingOpens == 0) {
+            completions = _initCompletions;
+            _initCompletions = nil;
+            result = _openError;
+        }
+    }
+    for (void (^completion)(NSError *) in completions) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(result); });
+    }
+}
+
+- (void)initializedWithCompletion:(void (^)(NSError *))completion {
+    if (!completion) return;
+    NSError *result = nil;
+    {
+        std::lock_guard<std::mutex> lock(_initMutex);
+        if (_pendingOpens > 0) {
+            if (!_initCompletions) _initCompletions = [NSMutableArray array];
+            [_initCompletions addObject:[completion copy]];
+            return;
+        }
+        result = _openError;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{ completion(result); });
 }
 
 - (NSError *)_errorFromOpenFailure:(const OpenFailure &)failure {
@@ -755,9 +895,11 @@ struct ReadTxHandle {
     [self _startTransaction:beginSQL completion:completion];
 }
 
+/// Callers hold _txMutex, which is what makes assigning _activeWriteTxId here safe.
 - (void)_startTransaction:(const std::string &)beginSQL
                completion:(void (^)(int, NSError *))completion {
     int txId = _nextTxId.fetch_add(1);
+    _activeWriteTxId = txId;
     std::string sql = beginSQL;
 
     dispatch_async(_writerQueue, ^{
@@ -767,6 +909,7 @@ struct ReadTxHandle {
             {
                 std::lock_guard<std::mutex> lock(self->_txMutex);
                 self->_hasActiveWriteTx = false;
+                self->_activeWriteTxId = -1;
             }
             NSError *nsError = [self _errorWithMessage:error
                                                   code:self->_writerConn.lastErrorCode()
@@ -783,10 +926,28 @@ struct ReadTxHandle {
     });
 }
 
+/// Valid while the BEGIN..COMMIT span is open, whether that span is driven
+/// asynchronously or by beginTransactionSync:error:.
+- (BOOL)_isWriteTxId:(int)txId {
+    if (txId < 0) return NO;
+    std::lock_guard<std::mutex> lock(_txMutex);
+    return txId == _activeWriteTxId || txId == _syncTxId;
+}
+
+- (NSError *)_invalidWriteTxError {
+    return [self _errorWithMessage:"Invalid transaction ID" code:SQLITE_MISUSE extendedCode:SQLITE_MISUSE];
+}
+
 - (void)executeInTransaction:(int)txId
                          sql:(NSString *)sql
                       params:(NSArray *)params
                   completion:(void (^)(NSError *))completion {
+    if (![self _isWriteTxId:txId]) {
+        NSError *error = [self _invalidWriteTxError];
+        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(error); });
+        return;
+    }
+
     const char *sqlUTF8 = strdup([sql UTF8String]);
     NSArray *paramsCopy = params ? [params copy] : nil;
 
@@ -825,6 +986,11 @@ struct ReadTxHandle {
                         sql:(NSString *)sql
                      params:(NSArray *)params
                  completion:(void (^)(NSString *, NSArray<NSData *> *, NSError *))completion {
+    if (![self _isWriteTxId:txId]) {
+        NSError *error = [self _invalidWriteTxError];
+        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, nil, error); });
+        return;
+    }
     [self _selectOnWriter:sql params:params arrayMode:NO completion:completion];
 }
 
@@ -832,6 +998,11 @@ struct ReadTxHandle {
                              sql:(NSString *)sql
                           params:(NSArray *)params
                       completion:(void (^)(NSString *, NSArray<NSData *> *, NSError *))completion {
+    if (![self _isWriteTxId:txId]) {
+        NSError *error = [self _invalidWriteTxError];
+        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, nil, error); });
+        return;
+    }
     [self _selectOnWriter:sql params:params arrayMode:YES completion:completion];
 }
 
@@ -840,13 +1011,20 @@ struct ReadTxHandle {
     dispatch_async(_writerQueue, ^{
         std::string error;
         bool ok = self->_writerConn.execute("COMMIT", error);
+        int code = self->_writerConn.lastErrorCode();
+        int extendedCode = self->_writerConn.lastExtendedErrorCode();
+        if (!ok) {
+            // A failed COMMIT leaves the transaction open, and the next queued
+            // write would silently join it.
+            std::string rollbackError;
+            self->_writerConn.execute("ROLLBACK", rollbackError);
+        }
         {
             std::lock_guard<std::mutex> lock(self->_txMutex);
             self->_hasActiveWriteTx = false;
+            if (self->_activeWriteTxId == txId) self->_activeWriteTxId = -1;
         }
-        NSError *nsError = ok ? nil : [self _errorWithMessage:error
-                                                         code:self->_writerConn.lastErrorCode()
-                                                 extendedCode:self->_writerConn.lastExtendedErrorCode()];
+        NSError *nsError = ok ? nil : [self _errorWithMessage:error code:code extendedCode:extendedCode];
         dispatch_async(dispatch_get_main_queue(), ^{
             completion(nsError);
         });
@@ -858,13 +1036,17 @@ struct ReadTxHandle {
                  completion:(void (^)(NSError *))completion {
     dispatch_async(_writerQueue, ^{
         std::string error;
-        self->_writerConn.execute("ROLLBACK", error);
+        bool ok = self->_writerConn.execute("ROLLBACK", error);
+        NSError *nsError = ok ? nil : [self _errorWithMessage:error
+                                                         code:self->_writerConn.lastErrorCode()
+                                                 extendedCode:self->_writerConn.lastExtendedErrorCode()];
         {
             std::lock_guard<std::mutex> lock(self->_txMutex);
             self->_hasActiveWriteTx = false;
+            if (self->_activeWriteTxId == txId) self->_activeWriteTxId = -1;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
-            completion(nil);
+            completion(nsError);
         });
         [self _flushPendingTransactions];
     });
@@ -1238,117 +1420,290 @@ struct ReadTxHandle {
 
 // MARK: - Sync Operations
 
-- (BOOL)_ensureSyncConn:(NSError **)error {
-    // Serialized mode uses the writer connection for sync operations; no
-    // dedicated sync connection is opened.
-    if (_serialized) return YES;
-    if (_syncConnOpened) return YES;
+/// The writer, unless this thread is inside a transactionSync span it opened.
+- (SyncTarget)_writerSyncTarget {
+    SyncTarget target;
+    target.conn = &_writerConn;
+    target.valid = true;
+    std::lock_guard<std::mutex> lock(_txMutex);
+    if (_syncTxId < 0 || _syncTxThread != std::this_thread::get_id()) {
+        target.queue = _writerQueue;
+    }
+    return target;
+}
 
-    OpenFailure failure;
-    int flags = (_readOnly
-        ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX)
-        : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX)) | SQLITE_OPEN_URI;
+- (SyncTarget)_syncTargetForTxId:(int)txId {
+    SyncTarget target;
+    if (txId < 0) return target;
+    {
+        std::lock_guard<std::mutex> lock(_txMutex);
+        if (txId == _syncTxId) {
+            // Only the thread holding the span may drive its connection; any
+            // other thread would have to wait for a span that is already over.
+            if (_syncTxThread != std::this_thread::get_id()) return target;
+            target.conn = &_writerConn;
+            target.valid = true;
+            return target;
+        }
+        if (txId == _activeWriteTxId) {
+            target.conn = &_writerConn;
+            target.queue = _writerQueue;
+            target.valid = true;
+            return target;
+        }
+    }
+    std::lock_guard<std::mutex> lock(_readTxMutex);
+    auto it = _readTxHandles.find(txId);
+    if (it != _readTxHandles.end()) {
+        target.conn = it->second.conn;
+        target.queue = it->second.queue;
+        target.valid = true;
+    }
+    return target;
+}
 
-    if (!_syncConn.open(_path, flags, _busyTimeoutMs, _encryptionKey, _onOpen, failure)) {
-        if (error) *error = [self _errorFromOpenFailure:failure];
+- (BOOL)_executeSyncOnTarget:(const SyncTarget &)target
+                         sql:(NSString *)sql
+                      params:(NSArray *)params
+                       error:(NSError **)error {
+    const char *sqlUTF8 = strdup([sql UTF8String]);
+    NSArray *paramsCopy = params ? [params copy] : nil;
+    SQLiteConnection *conn = target.conn;
+    ExecuteResult result{};
+    ExecuteResult *out = &result;
+    runSync(target, ^{ *out = executeSQL(*conn, sqlUTF8, paramsCopy); });
+    free((void *)sqlUTF8);
+
+    if (!result.success) {
+        if (error) *error = [self _errorWithMessage:result.error code:result.errorCode extendedCode:result.extendedErrorCode];
         return NO;
     }
-    if (!_readOnly) {
-        _syncConn.configureWAL(failure);
-    }
-    _syncConnOpened = true;
     return YES;
 }
 
-// Runs a select synchronously on the writer connection (serialized mode),
-// writing into outResult. The block is executed on _writerQueue via dispatch_sync
-// so the single connection is only ever touched from one queue. Note: must not be
-// called from within _writerQueue itself (it never is — async completions run on
-// the main queue).
-- (void)_selectSyncOnWriter:(NSString *)sql params:(NSArray *)params arrayMode:(BOOL)arrayMode into:(SelectResult *)outResult {
+- (NSString *)_selectSyncOnTarget:(const SyncTarget &)target
+                              sql:(NSString *)sql
+                           params:(NSArray *)params
+                        arrayMode:(BOOL)arrayMode
+                            blobs:(NSArray<NSData *> **)outBlobs
+                            error:(NSError **)error {
     const char *sqlUTF8 = strdup([sql UTF8String]);
     NSArray *paramsCopy = params ? [params copy] : nil;
-    SelectResult *out = outResult;
-    dispatch_sync(_writerQueue, ^{
-        *out = arrayMode
-            ? selectArraySQL(self->_writerConn, sqlUTF8, paramsCopy)
-            : selectSQL(self->_writerConn, sqlUTF8, paramsCopy);
+    SQLiteConnection *conn = target.conn;
+    SelectResult result{};
+    SelectResult *out = &result;
+    runSync(target, ^{
+        *out = arrayMode ? selectArraySQL(*conn, sqlUTF8, paramsCopy)
+                         : selectSQL(*conn, sqlUTF8, paramsCopy);
     });
     free((void *)sqlUTF8);
+
+    if (!result.success) {
+        if (error) *error = [self _errorWithMessage:result.error code:result.errorCode extendedCode:result.extendedErrorCode];
+        return nil;
+    }
+    if (outBlobs && !result.blobs.empty()) {
+        NSMutableArray<NSData *> *blobs = [NSMutableArray arrayWithCapacity:result.blobs.size()];
+        for (auto &b : result.blobs) [blobs addObject:b];
+        *outBlobs = blobs;
+    }
+    return [[NSString alloc] initWithUTF8String:result.json.c_str()];
 }
 
 - (BOOL)executeSync:(NSString *)sql
              params:(NSArray *)params
+    joinTransaction:(BOOL)joinTransaction
               error:(NSError **)error {
-    if (_serialized) {
-        const char *sqlUTF8 = strdup([sql UTF8String]);
-        NSArray *paramsCopy = params ? [params copy] : nil;
-        __block ExecuteResult result{};
-        dispatch_sync(_writerQueue, ^{
-            result = executeSQL(self->_writerConn, sqlUTF8, paramsCopy);
-        });
-        free((void *)sqlUTF8);
-        if (!result.success) {
-            if (error) *error = [self _errorWithMessage:result.error code:result.errorCode extendedCode:result.extendedErrorCode];
+    SyncTarget target = [self _writerSyncTarget];
+
+    // The safeguard is about silently joining a transaction the writer queue
+    // owns. A span this thread already holds cannot be joined by accident, and
+    // nothing asynchronous can run inside it, so it is exempt.
+    if (!joinTransaction && target.queue) {
+        std::lock_guard<std::mutex> lock(_txMutex);
+        if (_hasActiveWriteTx) {
+            if (error) *error = [self _errorWithMessage:kActiveWriteTxMessage code:SQLITE_BUSY extendedCode:SQLITE_BUSY];
             return NO;
         }
-        return YES;
     }
 
-    if (![self _ensureSyncConn:error]) return NO;
+    return [self _executeSyncOnTarget:target sql:sql params:params error:error];
+}
 
-    auto result = executeSQL(_syncConn, [sql UTF8String], params);
-    if (!result.success) {
-        if (error) *error = [self _errorWithMessage:result.error code:result.errorCode extendedCode:result.extendedErrorCode];
+- (NSString *)selectSync:(NSString *)sql
+                  params:(NSArray *)params
+                   blobs:(NSArray<NSData *> **)outBlobs
+                   error:(NSError **)error {
+    return [self _selectSyncOnTarget:[self _writerSyncTarget] sql:sql params:params arrayMode:NO blobs:outBlobs error:error];
+}
+
+- (NSString *)selectArraySync:(NSString *)sql
+                       params:(NSArray *)params
+                        blobs:(NSArray<NSData *> **)outBlobs
+                        error:(NSError **)error {
+    return [self _selectSyncOnTarget:[self _writerSyncTarget] sql:sql params:params arrayMode:YES blobs:outBlobs error:error];
+}
+
+// MARK: - Sync Operations Inside a Transaction
+
+- (BOOL)executeInTransactionSync:(int)txId
+                             sql:(NSString *)sql
+                          params:(NSArray *)params
+                           error:(NSError **)error {
+    SyncTarget target = [self _syncTargetForTxId:txId];
+    if (!target.valid) {
+        if (error) *error = [self _invalidWriteTxError];
+        return NO;
+    }
+    return [self _executeSyncOnTarget:target sql:sql params:params error:error];
+}
+
+- (NSString *)selectInTransactionSync:(int)txId
+                                  sql:(NSString *)sql
+                               params:(NSArray *)params
+                                blobs:(NSArray<NSData *> **)outBlobs
+                                error:(NSError **)error {
+    SyncTarget target = [self _syncTargetForTxId:txId];
+    if (!target.valid) {
+        if (error) *error = [self _invalidWriteTxError];
+        return nil;
+    }
+    return [self _selectSyncOnTarget:target sql:sql params:params arrayMode:NO blobs:outBlobs error:error];
+}
+
+- (NSString *)selectArrayInTransactionSync:(int)txId
+                                       sql:(NSString *)sql
+                                    params:(NSArray *)params
+                                     blobs:(NSArray<NSData *> **)outBlobs
+                                     error:(NSError **)error {
+    SyncTarget target = [self _syncTargetForTxId:txId];
+    if (!target.valid) {
+        if (error) *error = [self _invalidWriteTxError];
+        return nil;
+    }
+    return [self _selectSyncOnTarget:target sql:sql params:params arrayMode:YES blobs:outBlobs error:error];
+}
+
+// MARK: - Synchronous Transaction Span
+
+- (int)beginTransactionSync:(NSString *)behavior
+                      error:(NSError **)error {
+    std::string beginSQL = "BEGIN";
+    if (behavior && behavior.length > 0) {
+        beginSQL += " ";
+        beginSQL += [behavior UTF8String];
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(_txMutex);
+        if (_hasActiveWriteTx) {
+            if (error) *error = [self _errorWithMessage:kActiveWriteTxMessage code:SQLITE_BUSY extendedCode:SQLITE_BUSY];
+            return -1;
+        }
+        if (_syncTxId >= 0) {
+            if (error) *error = [self _errorWithMessage:"a synchronous transaction is already active on this database"
+                                                   code:SQLITE_MISUSE extendedCode:SQLITE_MISUSE];
+            return -1;
+        }
+    }
+
+    // Suspending from inside the drain block is what makes the span exclusive:
+    // everything queued earlier has finished, and nothing queued later — including
+    // anything dispatched from inside the span — runs before the resume.
+    dispatch_sync(_writerQueue, ^{ dispatch_suspend(self->_writerQueue); });
+
+    int txId = _nextTxId.fetch_add(1);
+    {
+        std::lock_guard<std::mutex> lock(_txMutex);
+        _syncTxId = txId;
+        _syncTxThread = std::this_thread::get_id();
+        _writerQueueSuspended = true;
+    }
+
+    std::string err;
+    if (!_writerConn.execute(beginSQL.c_str(), err)) {
+        if (error) *error = [self _errorWithMessage:err
+                                               code:_writerConn.lastErrorCode()
+                                       extendedCode:_writerConn.lastExtendedErrorCode()];
+        [self _endSyncTx:txId commit:NO error:NULL];
+        return -1;
+    }
+    return txId;
+}
+
+- (BOOL)endTransactionSync:(int)txId
+                    commit:(BOOL)commit
+                     error:(NSError **)error {
+    return [self _endSyncTx:txId commit:commit error:error];
+}
+
+- (BOOL)_endSyncTx:(int)txId
+            commit:(BOOL)commit
+             error:(NSError **)error {
+    {
+        std::lock_guard<std::mutex> lock(_txMutex);
+        // An id that is not the open span has already been ended; ending twice
+        // must not resume the queue twice.
+        if (txId < 0 || txId != _syncTxId) return YES;
+        _syncTxId = -1;
+        _syncTxThread = std::thread::id();
+    }
+
+    std::string err;
+    bool ok = _writerConn.execute(commit ? "COMMIT" : "ROLLBACK", err);
+    int code = _writerConn.lastErrorCode();
+    int extendedCode = _writerConn.lastExtendedErrorCode();
+    if (!ok && commit) {
+        // A failed COMMIT leaves the transaction open, and the queue is about to
+        // be resumed onto it.
+        std::string rollbackError;
+        _writerConn.execute("ROLLBACK", rollbackError);
+    }
+
+    // Resuming before the error is reported is what keeps a failing COMMIT, a
+    // throw or a closed database from leaving the queue held forever.
+    {
+        std::lock_guard<std::mutex> lock(_txMutex);
+        if (_writerQueueSuspended) {
+            _writerQueueSuspended = false;
+            dispatch_resume(_writerQueue);
+        }
+    }
+
+    if (!ok && commit) {
+        if (error) *error = [self _errorWithMessage:err code:code extendedCode:extendedCode];
         return NO;
     }
     return YES;
 }
 
-- (NSString *)selectSync:(NSString *)sql
-                  params:(NSArray *)params
-                   error:(NSError **)error {
-    if (_serialized) {
-        SelectResult result{};
-        [self _selectSyncOnWriter:sql params:params arrayMode:NO into:&result];
-        if (!result.success) {
-            if (error) *error = [self _errorWithMessage:result.error code:result.errorCode extendedCode:result.extendedErrorCode];
-            return nil;
-        }
-        return [[NSString alloc] initWithUTF8String:result.json.c_str()];
+- (void)_endAnyOpenSyncTx {
+    int txId;
+    {
+        std::lock_guard<std::mutex> lock(_txMutex);
+        txId = _syncTxId;
     }
-
-    if (![self _ensureSyncConn:error]) return nil;
-
-    auto result = selectSQL(_syncConn, [sql UTF8String], params);
-    if (!result.success) {
-        if (error) *error = [self _errorWithMessage:result.error code:result.errorCode extendedCode:result.extendedErrorCode];
-        return nil;
-    }
-    return [[NSString alloc] initWithUTF8String:result.json.c_str()];
+    if (txId >= 0) [self _endSyncTx:txId commit:NO error:NULL];
 }
 
-- (NSString *)selectArraySync:(NSString *)sql
-                       params:(NSArray *)params
-                        error:(NSError **)error {
-    if (_serialized) {
-        SelectResult result{};
-        [self _selectSyncOnWriter:sql params:params arrayMode:YES into:&result];
-        if (!result.success) {
-            if (error) *error = [self _errorWithMessage:result.error code:result.errorCode extendedCode:result.extendedErrorCode];
-            return nil;
-        }
-        return [[NSString alloc] initWithUTF8String:result.json.c_str()];
-    }
+// MARK: - Runtime Info
 
-    if (![self _ensureSyncConn:error]) return nil;
-
-    auto result = selectArraySQL(_syncConn, [sql UTF8String], params);
-    if (!result.success) {
-        if (error) *error = [self _errorWithMessage:result.error code:result.errorCode extendedCode:result.extendedErrorCode];
-        return nil;
+- (NSDictionary<NSString *, id> *)runtimeInfo {
+    NSMutableArray<NSString *> *compileOptions = [NSMutableArray array];
+    // An app may link a SQLite built without the compile-option diagnostics; the
+    // symbol then does not exist and referencing it breaks the link.
+#ifndef SQLITE_OMIT_COMPILEOPTION_DIAGS
+    for (int i = 0; ; i++) {
+        const char *option = sqlite3_compileoption_get(i);
+        if (!option) break;
+        [compileOptions addObject:[NSString stringWithUTF8String:option]];
     }
-    return [[NSString alloc] initWithUTF8String:result.json.c_str()];
+#endif
+    return @{
+        @"version": [NSString stringWithUTF8String:sqlite3_libversion()],
+        @"sourceId": [NSString stringWithUTF8String:sqlite3_sourceid()],
+        @"compileOptions": compileOptions
+    };
 }
 
 // MARK: - Close
@@ -1362,6 +1717,9 @@ struct ReadTxHandle {
     }
     _isOpen = NO;
 
+    // A held writer queue would never drain, so the drain below would hang.
+    [self _endAnyOpenSyncTx];
+
     // Reject pending queued transactions
     {
         std::lock_guard<std::mutex> lock(_txMutex);
@@ -1374,6 +1732,7 @@ struct ReadTxHandle {
         }
         _pendingTxStarts.clear();
         _hasActiveWriteTx = false;
+        _activeWriteTxId = -1;
     }
 
     dispatch_group_t group = dispatch_group_create();
@@ -1430,11 +1789,6 @@ struct ReadTxHandle {
         self->_readerConns.clear();
         self->_readerQueues.clear();
 
-        if (self->_syncConnOpened) {
-            self->_syncConn.close();
-            self->_syncConnOpened = false;
-        }
-
         if (completion) {
             completion();
         }
@@ -1446,6 +1800,11 @@ struct ReadTxHandle {
 }
 
 - (void)dealloc {
+    // GCD traps on releasing a suspended queue.
+    if (_writerQueueSuspended) {
+        _writerQueueSuspended = false;
+        dispatch_resume(_writerQueue);
+    }
     if (_isOpen) {
         _isOpen = NO;
         // Best-effort synchronous cleanup in dealloc
@@ -1461,9 +1820,7 @@ struct ReadTxHandle {
             _readerConns[i]->close();
             delete _readerConns[i];
         }
-        if (_syncConnOpened) {
-            _syncConn.close();
-        }
+        _readerConns.clear();
     }
 }
 

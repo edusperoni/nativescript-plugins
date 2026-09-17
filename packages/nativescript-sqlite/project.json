@@ -7,7 +7,7 @@
 		"build": {
 			"executor": "@nx/js:tsc",
 			"options": {
-				"outputPath": "dist/packages/nativescript-sqlite",
+				"outputPath": "{workspaceRoot}/dist/packages/nativescript-sqlite",
 				"tsConfig": "packages/nativescript-sqlite/tsconfig.json",
 				"packageJson": "packages/nativescript-sqlite/package.json",
 				"main": "packages/nativescript-sqlite/index.d.ts",
@@ -19,6 +19,11 @@
 						"glob": "**/*",
 						"input": "packages/nativescript-sqlite/platforms/",
 						"output": "./platforms/"
+					},
+					{
+						"glob": "**/*",
+						"input": "packages/nativescript-sqlite/docs/",
+						"output": "./docs/"
 					}
 				],
 				"dependsOn": [

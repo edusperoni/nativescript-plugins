@@ -11,7 +11,7 @@
 			"@edusperoni/nativescript-sms-inbox": ["packages/nativescript-sms-inbox/index.d.ts"],
 			"~/*": ["apps/demo-angular/src/*"],
 			"@edusperoni/nativescript-supabase": ["../../packages/nativescript-supabase/index.ts"],
-			"@edusperoni/nativescript-sqlite": ["../../packages/nativescript-sqlite/index.d.ts"]
+			"@edusperoni/nativescript-sqlite": ["packages/nativescript-sqlite/index.android.ts"]
 		}
 	},
 	"files": ["./references.d.ts", "./src/main.ts", "./src/polyfills.ts"],
