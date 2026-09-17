@@ -7,6 +7,47 @@
 #include <atomic>
 #include <cstring>
 
+// MARK: - Open Failure
+
+/// A failed step of opening a connection, captured before the handle is closed.
+struct OpenFailure {
+    int code = SQLITE_OK;
+    int extendedCode = SQLITE_OK;
+    std::string message;
+};
+
+/// NativeScript turns this into a JS exception, with the NSException reachable
+/// as `nativeException` — so the SQLite codes ride along in userInfo.
+static void raiseOpenFailure(const OpenFailure &failure) __attribute__((noreturn));
+static void raiseOpenFailure(const OpenFailure &failure) {
+    @throw [NSException exceptionWithName:@"NSSQLiteOpenError"
+                                   reason:[NSString stringWithUTF8String:failure.message.c_str()]
+                                 userInfo:@{@"code": @(failure.code), @"extendedCode": @(failure.extendedCode)}];
+}
+
+// MARK: - Encryption Key
+
+/**
+ * Renders the key as the operand of `PRAGMA key`, doubling any embedded quote
+ * so a key containing one can neither break the statement nor inject into it.
+ *
+ * SQLCipher's raw-key form — x'<64 hex>', or 96 hex to carry the salt — needs
+ * no special case: the codec recognises it from the string *value*, so it must
+ * arrive as ordinary quoted text like any other key. Emitting it unquoted
+ * would instead be a blob literal, which PRAGMA does not accept at all.
+ */
+static std::string encryptionKeyLiteral(const std::string &key) {
+    std::string literal;
+    literal.reserve(key.size() + 2);
+    literal.push_back('\'');
+    for (char c : key) {
+        if (c == '\'') literal.push_back('\'');
+        literal.push_back(c);
+    }
+    literal.push_back('\'');
+    return literal;
+}
+
 // MARK: - JSON String Builder
 
 class JSONBuilder {
@@ -85,10 +126,14 @@ public:
 
     sqlite3 *handle() const { return db_; }
 
-    bool open(const std::string &path, int flags, int busyTimeoutMs, const std::string &encryptionKey, std::string &outError) {
+    bool open(const std::string &path, int flags, int busyTimeoutMs, const std::string &encryptionKey, const std::vector<std::string> &onOpen, OpenFailure &outError) {
         int rc = sqlite3_open_v2(path.c_str(), &db_, flags, nullptr);
         if (rc != SQLITE_OK) {
-            outError = db_ ? sqlite3_errmsg(db_) : "Failed to allocate memory for database";
+            // sqlite3_open_v2 still hands back a handle on most failures, and the
+            // message only lives on that handle — so read it before closing.
+            outError.code = rc;
+            outError.extendedCode = db_ ? sqlite3_extended_errcode(db_) : rc;
+            outError.message = db_ ? sqlite3_errmsg(db_) : "out of memory allocating the database handle";
             if (db_) { sqlite3_close(db_); db_ = nullptr; }
             return false;
         }
@@ -97,14 +142,21 @@ public:
         sqlite3_busy_timeout(db_, busyTimeoutMs);
 
         if (!encryptionKey.empty()) {
-            std::string pragmaSQL = "PRAGMA key = '" + encryptionKey + "'";
-            char *errMsg = nullptr;
-            rc = sqlite3_exec(db_, pragmaSQL.c_str(), nullptr, nullptr, &errMsg);
-            if (rc != SQLITE_OK) {
-                outError = errMsg ? errMsg : "Failed to set encryption key";
-                if (errMsg) sqlite3_free(errMsg);
-                sqlite3_close(db_);
-                db_ = nullptr;
+            std::string pragmaSQL = "PRAGMA key = " + encryptionKeyLiteral(encryptionKey);
+            if (!execPragma(pragmaSQL.c_str(), outError)) {
+                close();
+                return false;
+            }
+        }
+
+        // Runs after the key, so these statements are the first ones that can
+        // read the database. That ordering is the point: setup which needs a
+        // readable schema — registering an FTS5 tokenizer, for instance — cannot
+        // use sqlite3_auto_extension, because auto-extensions run inside
+        // sqlite3_open_v2, before any key has been applied.
+        for (const std::string &sql : onOpen) {
+            if (!execPragma(sql.c_str(), outError)) {
+                close();
                 return false;
             }
         }
@@ -112,15 +164,8 @@ public:
         return true;
     }
 
-    bool configureWAL(std::string &outError) {
-        char *errMsg = nullptr;
-        int rc = sqlite3_exec(db_, "PRAGMA journal_mode=WAL", nullptr, nullptr, &errMsg);
-        if (rc != SQLITE_OK) {
-            outError = errMsg ? errMsg : "Failed to set WAL mode";
-            if (errMsg) sqlite3_free(errMsg);
-            return false;
-        }
-        return true;
+    bool configureWAL(OpenFailure &outError) {
+        return execPragma("PRAGMA journal_mode=WAL", outError);
     }
 
     void close() {
@@ -139,6 +184,20 @@ public:
         int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &errMsg);
         if (rc != SQLITE_OK) {
             outError = errMsg ? errMsg : sqlite3_errmsg(db_);
+            if (errMsg) sqlite3_free(errMsg);
+            return false;
+        }
+        return true;
+    }
+
+private:
+    bool execPragma(const char *sql, OpenFailure &outError) {
+        char *errMsg = nullptr;
+        int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &errMsg);
+        if (rc != SQLITE_OK) {
+            outError.code = rc;
+            outError.extendedCode = sqlite3_extended_errcode(db_);
+            outError.message = errMsg ? errMsg : sqlite3_errmsg(db_);
             if (errMsg) sqlite3_free(errMsg);
             return false;
         }
@@ -456,9 +515,11 @@ struct ReadTxHandle {
 
     std::string _path;
     std::string _encryptionKey;
+    std::vector<std::string> _onOpen;
     int _busyTimeoutMs;
     BOOL _readOnly;
     BOOL _isOpen;
+    bool _serialized;
 
     std::atomic<int> _nextTxId;
     std::atomic<int> _nextStmtId;
@@ -479,23 +540,32 @@ struct ReadTxHandle {
                     poolSize:(int)poolSize
                     readOnly:(BOOL)readOnly
                  busyTimeout:(int)busyTimeoutMs
-               encryptionKey:(NSString *)encryptionKey {
+               encryptionKey:(NSString *)encryptionKey
+                      onOpen:(NSArray<NSString *> *)onOpen
+                  serialized:(BOOL)serialized {
     NSSQLiteDatabase *db = [[NSSQLiteDatabase alloc] init];
-    if (![db _openWithPath:path poolSize:poolSize readOnly:readOnly busyTimeout:busyTimeoutMs encryptionKey:encryptionKey]) {
-        return nil;
-    }
+    [db _openWithPath:path poolSize:poolSize readOnly:readOnly busyTimeout:busyTimeoutMs encryptionKey:encryptionKey onOpen:onOpen serialized:serialized];
     return db;
 }
 
-- (BOOL)_openWithPath:(NSString *)path
+- (void)_openWithPath:(NSString *)path
              poolSize:(int)poolSize
              readOnly:(BOOL)readOnly
           busyTimeout:(int)busyTimeoutMs
-        encryptionKey:(NSString *)encryptionKey {
+        encryptionKey:(NSString *)encryptionKey
+               onOpen:(NSArray<NSString *> *)onOpen
+           serialized:(BOOL)serialized {
+    _serialized = serialized;
     _path = [path UTF8String];
     _busyTimeoutMs = busyTimeoutMs;
     _readOnly = readOnly;
     _encryptionKey = encryptionKey ? [encryptionKey UTF8String] : "";
+    _onOpen.clear();
+    for (NSString *sql in onOpen) {
+        if (sql.length) {
+            _onOpen.emplace_back([sql UTF8String]);
+        }
+    }
     _syncConnOpened = false;
     _readerIndex = 0;
     _nextTxId = 1;
@@ -503,21 +573,27 @@ struct ReadTxHandle {
     _hasActiveWriteTx = false;
 
     std::string error;
+    OpenFailure failure;
 
-    int writerFlags = readOnly
+    // SQLITE_OPEN_URI is always safe to set: SQLite only applies URI parsing to
+    // filenames that begin with "file:" (e.g. "file:/db?vfs=memdb"); any other
+    // path — even one containing "?" — is treated as an ordinary filename.
+    int writerFlags = (readOnly
         ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX)
-        : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX);
+        : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX)) | SQLITE_OPEN_URI;
 
-    if (!_writerConn.open(_path, writerFlags, busyTimeoutMs, _encryptionKey, error)) {
-        NSLog(@"[NSSQLiteDatabase] Failed to open writer: %s", error.c_str());
-        return NO;
+    if (!_writerConn.open(_path, writerFlags, busyTimeoutMs, _encryptionKey, _onOpen, failure)) {
+        NSLog(@"[NSSQLiteDatabase] Failed to open writer: %s", failure.message.c_str());
+        raiseOpenFailure(failure);
     }
 
+    // Enable WAL for read/write databases. For in-memory databases the pragma is
+    // a harmless no-op (journal mode stays "memory").
     if (!readOnly) {
-        if (!_writerConn.configureWAL(error)) {
-            NSLog(@"[NSSQLiteDatabase] Failed to enable WAL: %s", error.c_str());
+        if (!_writerConn.configureWAL(failure)) {
+            NSLog(@"[NSSQLiteDatabase] Failed to enable WAL: %s", failure.message.c_str());
             _writerConn.close();
-            return NO;
+            raiseOpenFailure(failure);
         }
     }
 
@@ -526,15 +602,22 @@ struct ReadTxHandle {
 
     if (poolSize < 1) poolSize = 1;
 
+    // Serialized mode: no reader pool. All reads, writes, transactions and sync
+    // operations run on the single writer connection via _writerQueue.
+    if (serialized) {
+        _isOpen = YES;
+        return;
+    }
+
     // Readers open as READWRITE so they can initialize WAL shared memory (SHM).
     // READONLY connections cannot create/map the SHM file, which causes "unable to
     // open database file" errors when the DB is already in WAL mode.
     // PRAGMA query_only=ON prevents accidental writes through these connections.
     for (int i = 0; i < poolSize; i++) {
         auto *reader = new SQLiteConnection();
-        int readerFlags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) | SQLITE_OPEN_NOMUTEX;
-        if (!reader->open(_path, readerFlags, busyTimeoutMs, _encryptionKey, error)) {
-            NSLog(@"[NSSQLiteDatabase] Failed to open reader %d: %s", i, error.c_str());
+        int readerFlags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI;
+        if (!reader->open(_path, readerFlags, busyTimeoutMs, _encryptionKey, _onOpen, failure)) {
+            NSLog(@"[NSSQLiteDatabase] Failed to open reader %d: %s", i, failure.message.c_str());
             delete reader;
             continue;
         }
@@ -549,7 +632,10 @@ struct ReadTxHandle {
     }
 
     _isOpen = YES;
-    return YES;
+}
+
+- (NSError *)_errorFromOpenFailure:(const OpenFailure &)failure {
+    return [self _errorWithMessage:failure.message code:failure.code extendedCode:failure.extendedCode];
 }
 
 - (BOOL)isOpen {
@@ -609,6 +695,11 @@ struct ReadTxHandle {
 - (void)select:(NSString *)sql
         params:(NSArray *)params
     completion:(void (^)(NSString *, NSArray<NSData *> *, NSError *))completion {
+    // Serialized mode (or an empty pool): run reads on the writer connection.
+    if (_serialized || _readerQueues.empty()) {
+        [self _selectOnWriter:sql params:params arrayMode:NO completion:completion];
+        return;
+    }
     int idx = _readerIndex.fetch_add(1) % (int)_readerQueues.size();
     dispatch_queue_t queue = _readerQueues[idx];
     SQLiteConnection *conn = _readerConns[idx];
@@ -627,6 +718,11 @@ struct ReadTxHandle {
 - (void)selectArray:(NSString *)sql
              params:(NSArray *)params
          completion:(void (^)(NSString *, NSArray<NSData *> *, NSError *))completion {
+    // Serialized mode (or an empty pool): run reads on the writer connection.
+    if (_serialized || _readerQueues.empty()) {
+        [self _selectOnWriter:sql params:params arrayMode:YES completion:completion];
+        return;
+    }
     int idx = _readerIndex.fetch_add(1) % (int)_readerQueues.size();
     dispatch_queue_t queue = _readerQueues[idx];
     SQLiteConnection *conn = _readerConns[idx];
@@ -787,6 +883,14 @@ struct ReadTxHandle {
 // MARK: - Read Transactions
 
 - (void)beginReadTransaction:(void (^)(int, NSError *))completion {
+    // Serialized mode: there is no reader pool. A read transaction becomes a
+    // regular deferred transaction on the single connection, gated so it never
+    // overlaps a write transaction.
+    if (_serialized) {
+        [self beginTransaction:@"DEFERRED" completion:completion];
+        return;
+    }
+
     int readerIdx = -1;
     {
         std::lock_guard<std::mutex> lock(_readTxMutex);
@@ -842,6 +946,13 @@ struct ReadTxHandle {
                  params:(NSArray *)params
               arrayMode:(BOOL)arrayMode
              completion:(void (^)(NSString *, NSArray<NSData *> *, NSError *))completion {
+    // Serialized mode: the read transaction is an ordinary transaction on the
+    // single connection, so just run the select on the writer queue.
+    if (_serialized) {
+        [self _selectOnWriter:sql params:params arrayMode:arrayMode completion:completion];
+        return;
+    }
+
     ReadTxHandle handle;
     {
         std::lock_guard<std::mutex> lock(_readTxMutex);
@@ -884,6 +995,13 @@ struct ReadTxHandle {
 
 - (void)endReadTransaction:(int)txId
                 completion:(void (^)(NSError *))completion {
+    // Serialized mode: end the underlying transaction (COMMIT is a no-op for a
+    // read-only transaction) and release the gate for any queued transaction.
+    if (_serialized) {
+        [self commitTransaction:txId completion:completion];
+        return;
+    }
+
     ReadTxHandle handle;
     {
         std::lock_guard<std::mutex> lock(_readTxMutex);
@@ -1121,27 +1239,62 @@ struct ReadTxHandle {
 // MARK: - Sync Operations
 
 - (BOOL)_ensureSyncConn:(NSError **)error {
+    // Serialized mode uses the writer connection for sync operations; no
+    // dedicated sync connection is opened.
+    if (_serialized) return YES;
     if (_syncConnOpened) return YES;
 
-    std::string err;
-    int flags = _readOnly
+    OpenFailure failure;
+    int flags = (_readOnly
         ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX)
-        : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX);
+        : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX)) | SQLITE_OPEN_URI;
 
-    if (!_syncConn.open(_path, flags, _busyTimeoutMs, _encryptionKey, err)) {
-        if (error) *error = [self _errorWithMessage:err code:SQLITE_CANTOPEN extendedCode:SQLITE_CANTOPEN];
+    if (!_syncConn.open(_path, flags, _busyTimeoutMs, _encryptionKey, _onOpen, failure)) {
+        if (error) *error = [self _errorFromOpenFailure:failure];
         return NO;
     }
     if (!_readOnly) {
-        _syncConn.configureWAL(err);
+        _syncConn.configureWAL(failure);
     }
     _syncConnOpened = true;
     return YES;
 }
 
+// Runs a select synchronously on the writer connection (serialized mode),
+// writing into outResult. The block is executed on _writerQueue via dispatch_sync
+// so the single connection is only ever touched from one queue. Note: must not be
+// called from within _writerQueue itself (it never is — async completions run on
+// the main queue).
+- (void)_selectSyncOnWriter:(NSString *)sql params:(NSArray *)params arrayMode:(BOOL)arrayMode into:(SelectResult *)outResult {
+    const char *sqlUTF8 = strdup([sql UTF8String]);
+    NSArray *paramsCopy = params ? [params copy] : nil;
+    SelectResult *out = outResult;
+    dispatch_sync(_writerQueue, ^{
+        *out = arrayMode
+            ? selectArraySQL(self->_writerConn, sqlUTF8, paramsCopy)
+            : selectSQL(self->_writerConn, sqlUTF8, paramsCopy);
+    });
+    free((void *)sqlUTF8);
+}
+
 - (BOOL)executeSync:(NSString *)sql
              params:(NSArray *)params
               error:(NSError **)error {
+    if (_serialized) {
+        const char *sqlUTF8 = strdup([sql UTF8String]);
+        NSArray *paramsCopy = params ? [params copy] : nil;
+        __block ExecuteResult result{};
+        dispatch_sync(_writerQueue, ^{
+            result = executeSQL(self->_writerConn, sqlUTF8, paramsCopy);
+        });
+        free((void *)sqlUTF8);
+        if (!result.success) {
+            if (error) *error = [self _errorWithMessage:result.error code:result.errorCode extendedCode:result.extendedErrorCode];
+            return NO;
+        }
+        return YES;
+    }
+
     if (![self _ensureSyncConn:error]) return NO;
 
     auto result = executeSQL(_syncConn, [sql UTF8String], params);
@@ -1155,6 +1308,16 @@ struct ReadTxHandle {
 - (NSString *)selectSync:(NSString *)sql
                   params:(NSArray *)params
                    error:(NSError **)error {
+    if (_serialized) {
+        SelectResult result{};
+        [self _selectSyncOnWriter:sql params:params arrayMode:NO into:&result];
+        if (!result.success) {
+            if (error) *error = [self _errorWithMessage:result.error code:result.errorCode extendedCode:result.extendedErrorCode];
+            return nil;
+        }
+        return [[NSString alloc] initWithUTF8String:result.json.c_str()];
+    }
+
     if (![self _ensureSyncConn:error]) return nil;
 
     auto result = selectSQL(_syncConn, [sql UTF8String], params);
@@ -1168,6 +1331,16 @@ struct ReadTxHandle {
 - (NSString *)selectArraySync:(NSString *)sql
                        params:(NSArray *)params
                         error:(NSError **)error {
+    if (_serialized) {
+        SelectResult result{};
+        [self _selectSyncOnWriter:sql params:params arrayMode:YES into:&result];
+        if (!result.success) {
+            if (error) *error = [self _errorWithMessage:result.error code:result.errorCode extendedCode:result.extendedErrorCode];
+            return nil;
+        }
+        return [[NSString alloc] initWithUTF8String:result.json.c_str()];
+    }
+
     if (![self _ensureSyncConn:error]) return nil;
 
     auto result = selectArraySQL(_syncConn, [sql UTF8String], params);

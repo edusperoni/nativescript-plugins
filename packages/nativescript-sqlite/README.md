@@ -86,12 +86,23 @@ const db = openDatabase({
 });
 ```
 
-| Option          | Type        | Default      | Description                                       |
-| --------------- | ----------- | ------------ | ------------------------------------------------- |
-| `path`        | `string`  | *required* | Full path to the database file, or `":memory:"` |
-| `readOnly`    | `boolean` | `false`    | Open in read-only mode                            |
-| `poolSize`    | `number`  | `4`        | Number of reader connections in the pool          |
-| `busyTimeout` | `number`  | `5000`     | Busy timeout in milliseconds                      |
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `path` | `string` | *required* | Full path to the database file, or `":memory:"` |
+| `readOnly` | `boolean` | `false` | Open in read-only mode |
+| `poolSize` | `number` | `4` | Number of reader connections in the pool (ignored in serialized mode) |
+| `busyTimeout` | `number` | `5000` | Busy timeout in milliseconds |
+| `serialized` | `boolean` | auto | Use a single serialized connection instead of the reader pool. Defaults to `true` for in-memory databases, `false` otherwise |
+
+> **In-memory databases:** passing `":memory:"` (or an empty path) defaults to **serialized mode** — a single connection handles all reads, writes, transactions, and sync calls. This is required because a pool of separate connections cannot share a private in-memory database. In serialized mode at most one transaction is active at a time and reads never run concurrently with writes. Each `openDatabase(":memory:")` call gets its own isolated database.
+>
+> To run a connection *pool* over an in-memory database instead, set `serialized: false` and pass a [`memdb` VFS](https://sqlite.org/uri.html) URI (SQLite ≥ 3.36, i.e. iOS 15+) so the pooled connections share one database:
+>
+> ```ts
+> openDatabase({ path: 'file:/mydb?vfs=memdb', serialized: false });
+> ```
+>
+> Prefer `memdb` over the older `?mode=memory&cache=shared` (shared-cache) form: shared cache uses table-level locking and returns `SQLITE_LOCKED` on contention, which `busyTimeout` does **not** retry; `memdb` returns a retryable `SQLITE_BUSY` instead. The shared in-memory database lives only while at least one connection is open (the pool keeps it alive), and is destroyed once the database is closed. The URI name must begin with `/`.
 
 ### SQLiteDatabase
 
@@ -397,53 +408,25 @@ const db = openDatabase({
 
 Every connection in the pool (writer, readers, sync) automatically receives the key via `PRAGMA key` after opening. If the key is wrong or missing for an encrypted database, operations will fail with `SQLITE_NOTADB`.
 
-## Android SQLite Setup
+#### Passphrase vs raw key
 
-This package uses a 100% native C++ architecture on Android and provides three ways to link SQLite. Configure via `App_Resources/Android/gradle.properties`.
+The string above is a passphrase: SQLCipher stretches it with PBKDF2 (256,000 iterations by default) **once per connection**, so a pool of 4 pays that cost four times before the first query.
 
-### Option A: Bundled SQLite (Default)
-
-By default, the plugin compiles and statically links its own bundled copy of the SQLite C amalgamation (`sqlite3.c`). This ensures a consistent, up-to-date version across all Android devices regardless of OS version.
-
-You can pass extra C compile flags to the bundled build:
-
-```properties
-# App_Resources/Android/gradle.properties
-nscsqlite.sqliteImpl=bundled
-nscsqlite.sqliteFlags=-DSQLITE_ENABLE_FTS5;-DSQLITE_ENABLE_JSON1
-```
-
-### Option B: SQLCipher (Encryption)
-
-The plugin ships a bundled SQLCipher amalgamation that provides transparent AES-256-CBC encryption via OpenSSL. Selecting this option statically links SQLCipher instead of plain SQLite — no separate `.so` or pod required.
-
-```properties
-# App_Resources/Android/gradle.properties
-nscsqlite.sqliteImpl=sqlcipher
-```
-
-Then pass an encryption key when opening the database:
+If your key is already full-entropy random bytes, ask for the raw form instead and skip derivation entirely:
 
 ```typescript
 const db = openDatabase({
   path: knownFolders.documents().path + '/encrypted.sqlite',
-  encryptionKey: 'my-secret-passphrase',
+  encryptionKey: hexKey, // 64 hex digits = the 32-byte key; 96 supplies the salt too
+  encryptionKeyFormat: 'raw',
 });
 ```
 
-Every connection in the pool automatically receives the key via `PRAGMA key` after opening. If the key is wrong or missing for an encrypted database, operations fail with `SQLITE_NOTADB`.
+The two are equally strong for a random key — PBKDF2 exists to stretch low-entropy secrets, and there is nothing to stretch. For a human-chosen passphrase, that derivation is exactly what makes offline guessing expensive, so keep the default.
 
-### Option C: Custom Build
+They are, however, **different keys**: a database must be opened with the same form it was created with.
 
-Link against any pre-built SQLite-compatible shared library (`.so`) you supply — useful for a heavily customized SQLite build or a third-party distribution. Place ABI subdirectories (`arm64-v8a/`, `x86_64/`, etc.) under `sqliteLibDir`.
-
-```properties
-# App_Resources/Android/gradle.properties
-nscsqlite.sqliteImpl=custom
-nscsqlite.sqliteLibName=sqlite3
-nscsqlite.sqliteIncludeDir=/path/to/include
-nscsqlite.sqliteLibDir=/path/to/libs
-```
+`encryptionKeyFormat` is explicit rather than inferred because SQLCipher switches to raw-key material on its own for any key shaped like `x'<64 hex>'`. Leaving that to the shape of a string means one key silently becoming another, so a raw-looking key passed without the option is rejected with an error instead.
 
 ## Type Definitions
 
@@ -463,6 +446,7 @@ interface DatabaseOptions {
   poolSize?: number;
   busyTimeout?: number;
   encryptionKey?: string;
+  encryptionKeyFormat?: 'passphrase' | 'raw';
 }
 ```
 

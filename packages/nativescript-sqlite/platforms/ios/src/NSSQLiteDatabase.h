@@ -2,11 +2,18 @@
 
 @interface NSSQLiteDatabase : NSObject
 
+/**
+ * Throws an NSSQLiteOpenError NSException if the database cannot be opened. Its
+ * `reason` is sqlite3_errmsg and its `userInfo` carries the `code` and
+ * `extendedCode` SQLite reported.
+ */
 + (instancetype)openWithPath:(NSString *)path
                     poolSize:(int)poolSize
                     readOnly:(BOOL)readOnly
                  busyTimeout:(int)busyTimeoutMs
-               encryptionKey:(NSString *)encryptionKey;
+               encryptionKey:(NSString *)encryptionKey
+                      onOpen:(NSArray<NSString *> *)onOpen
+                  serialized:(BOOL)serialized;
 
 // --- Async operations (dispatch to GCD, callback on main queue) ---
 
