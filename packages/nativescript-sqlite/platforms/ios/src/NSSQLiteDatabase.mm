@@ -105,7 +105,8 @@ public:
     }
 
     void appendBlobPlaceholder(int index) {
-        buf_.append("{\"__blob__\":", 11);
+        static const char prefix[] = "{\"__blob__\":";
+        buf_.append(prefix, sizeof(prefix) - 1);
         appendInt(index);
         buf_.push_back('}');
     }
