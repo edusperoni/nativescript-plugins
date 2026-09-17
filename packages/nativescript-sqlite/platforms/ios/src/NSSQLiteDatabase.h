@@ -108,6 +108,14 @@
              params:(NSArray *)params
               error:(NSError **)error;
 
+// --- Runtime info ---
+
+/**
+ * Keys: `version`, `sourceId`, `compileOptions` (NSArray<NSString *> *).
+ * Reports the linked SQLite library, so it stays valid on a closed database.
+ */
+- (NSDictionary<NSString *, id> *)runtimeInfo;
+
 // --- Lifecycle ---
 
 - (void)closeWithCompletion:(void (^)(void))completion;

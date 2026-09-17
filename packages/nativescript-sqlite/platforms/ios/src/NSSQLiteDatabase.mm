@@ -1351,6 +1351,26 @@ struct ReadTxHandle {
     return [[NSString alloc] initWithUTF8String:result.json.c_str()];
 }
 
+// MARK: - Runtime Info
+
+- (NSDictionary<NSString *, id> *)runtimeInfo {
+    NSMutableArray<NSString *> *compileOptions = [NSMutableArray array];
+    // An app may link a SQLite built without the compile-option diagnostics; the
+    // symbol then does not exist and referencing it breaks the link.
+#ifndef SQLITE_OMIT_COMPILEOPTION_DIAGS
+    for (int i = 0; ; i++) {
+        const char *option = sqlite3_compileoption_get(i);
+        if (!option) break;
+        [compileOptions addObject:[NSString stringWithUTF8String:option]];
+    }
+#endif
+    return @{
+        @"version": [NSString stringWithUTF8String:sqlite3_libversion()],
+        @"sourceId": [NSString stringWithUTF8String:sqlite3_sourceid()],
+        @"compileOptions": compileOptions
+    };
+}
+
 // MARK: - Close
 
 - (void)closeWithCompletion:(void (^)(void))completion {

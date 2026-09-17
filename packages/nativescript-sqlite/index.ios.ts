@@ -35,6 +35,8 @@ declare class NSSQLiteDatabase extends NSObject {
 	selectSyncParamsError(sql: string, params: NSArray<any>): string;
 	selectArraySyncParamsError(sql: string, params: NSArray<any>): string;
 
+	runtimeInfo(): NSDictionary<string, any>;
+
 	closeWithCompletion(completion: () => void): void;
 	close(): void;
 	isOpen: boolean;
@@ -515,10 +517,16 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 	}
 
 	getRuntimeInfo(): RuntimeInfo {
+		const info = this.native.runtimeInfo();
+		const options = info.objectForKey('compileOptions') as NSArray<string>;
+		const compileOptions: string[] = [];
+		for (let i = 0; i < options.count; i++) {
+			compileOptions.push(options.objectAtIndex(i));
+		}
 		return {
-			version: '3.x',
-			sourceId: 'ios-stub',
-			compileOptions: [],
+			version: info.objectForKey('version') as string,
+			sourceId: info.objectForKey('sourceId') as string,
+			compileOptions,
 		};
 	}
 
