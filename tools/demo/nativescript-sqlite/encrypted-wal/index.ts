@@ -186,9 +186,8 @@ export async function runEncryptedWalTest(opts?: RunEncryptedWalOptions): Promis
 			}
 		});
 
-		await step('A.codecCapability', async () => {
+		const capability = await step('A.codecCapability', async () => {
 			const probe = await probeCodec(`${docs}/codec_probe.db`);
-			codecMode = probe.mode;
 			if (probe.mode === 'refused') {
 				// The bundled preset is the only engine the plugin knows to be
 				// codec-less, and the refusal has to name it so the message is
@@ -197,6 +196,7 @@ export async function runEncryptedWalTest(opts?: RunEncryptedWalOptions): Promis
 			}
 			return probe;
 		});
+		codecMode = capability ? capability.mode : 'plaintext';
 
 		const keyed = codecMode === 'codec';
 		// Everything but the key stays the same on a codec-less build, so WAL,
@@ -385,7 +385,7 @@ export async function runEncryptedWalTest(opts?: RunEncryptedWalOptions): Promis
 				timings[`reopenOpenMs_${suffix}_pool4`] = round(opened - t0, 2);
 				timings[`reopenFirstQueryMs_${suffix}_pool4`] = round(firstQuery - opened, 2);
 				const jm = await re.get<{ journal_mode: string }>('PRAGMA journal_mode');
-				const integrity = await re.get<Record<string, unknown>>('PRAGMA integrity_check');
+				const integrity = await re.get('PRAGMA integrity_check');
 				const t = await re.select<{ id: number; v: string }>('SELECT id, v FROM t ORDER BY id');
 				const fts = await re.select<{ body: string }>("SELECT body FROM f WHERE f MATCH 'encrypted'");
 				const integrityValue = integrity ? String(integrity[Object.keys(integrity)[0]]) : '';
