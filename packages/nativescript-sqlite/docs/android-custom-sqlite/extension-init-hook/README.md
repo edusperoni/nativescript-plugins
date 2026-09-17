@@ -77,8 +77,7 @@ so on that engine the hook is free and no chaining is needed.
 
 `sqlite3_auto_extension()` runs inside `sqlite3_open_v2()` — **before** the
 plugin applies `PRAGMA key`. Anything that needs to read the schema of an
-encrypted database, such as registering an FTS5 tokenizer against an existing
-table, cannot happen there. Use the plugin's
+encrypted database cannot happen there. Use the plugin's
 [`onOpen`](../../../README.md#opendatabaseoptions-sqlitedatabase) option for that
 instead; it runs on every connection, immediately after keying and before any
 query.
