@@ -27,6 +27,9 @@ std::string encryptionKeyLiteral(const std::string& key) {
     return literal;
 }
 
+// Stands in for a message that quoted the key back.
+constexpr const char* kKeyStepFailedMessage = "the encryption key could not be applied";
+
 constexpr const char* kThreadUnsafeMessage =
     "the linked SQLite was built with SQLITE_THREADSAFE=0; nscsqlite requires a "
     "thread-safe SQLite (build it with SQLITE_THREADSAFE=2)";
@@ -52,9 +55,20 @@ bool sqliteIsThreadSafe() {
 bool SQLiteConnection::open(const OpenOptions& opts) {
     path_ = opts.path;
     if (runOpenSequence(opts)) return true;
+    QueryResult failure = errorResult();
+    std::lock_guard<std::mutex> lk(errorMutex_);
     openFailed_ = true;
-    openError_  = errorResult();
+    openError_  = std::move(failure);
     return false;
+}
+
+void SQLiteConnection::recordOpenFailure(const QueryResult& error) {
+    std::lock_guard<std::mutex> lk(errorMutex_);
+    if (openFailed_) return;
+    openFailed_ = true;
+    openError_  = error;
+    lastError_  = error.error;
+    lastCode_   = error.errorCode;
 }
 
 bool SQLiteConnection::runOpenSequence(const OpenOptions& opts)
@@ -96,32 +110,48 @@ bool SQLiteConnection::runOpenSequence(const OpenOptions& opts)
     if (opts.busyTimeoutMs > 0)
         sqlite3_busy_timeout(db_, opts.busyTimeoutMs);
 
-    // Encryption (SQLCipher / SEE pattern)
-    if (!opts.encryptionKey.empty()) {
-        if (!runOpenStatement("PRAGMA key = " + encryptionKeyLiteral(opts.encryptionKey)))
-            return false;
+    // The order is the caller's, and SQLite constrains it: the key has to precede
+    // anything that reads the database, which is also why sqlite3_auto_extension
+    // cannot stand in for these statements — an auto-extension runs inside
+    // sqlite3_open_v2, before any key has been applied.
+    for (size_t i = 0; i < opts.openSequence.size(); ++i) {
+        const OpenStep& step = opts.openSequence[i];
+        if (step.scope == OpenStepScope::Writer && !opts.isWriter) continue;
+        if (step.scope == OpenStepScope::Readers && opts.isWriter) continue;
+
+        const std::string what = "open step " + std::to_string(i);
+        switch (step.kind) {
+            case OpenStepKind::Sql:
+                if (step.sql.empty()) continue;
+                if (!runOpenStatement(what, step.sql)) return false;
+                break;
+
+            case OpenStepKind::Key:
+                if (opts.encryptionKey.empty()) continue;
+                if (!runOpenStatement(what, "PRAGMA key = " + encryptionKeyLiteral(opts.encryptionKey),
+                                      &opts.encryptionKey))
+                    return false;
+                break;
+
+            case OpenStepKind::Wal:
+                if (!opts.isWriter || opts.readOnly) continue;
+                if (!runOpenStatement(what, "PRAGMA journal_mode=WAL")) return false;
+                break;
+
+            default:
+                break;
+        }
     }
 
-    // Runs after the key, so these statements are the first ones that can read the
-    // database. That ordering is the point: setup which needs a readable schema —
-    // registering an FTS5 tokenizer, for instance — cannot use
-    // sqlite3_auto_extension, because auto-extensions run inside sqlite3_open_v2,
-    // before any key has been applied.
-    for (const std::string& sql : opts.onOpen) {
-        if (sql.empty()) continue;
-        if (!runOpenStatement(sql)) return false;
-    }
-
-    if (opts.journalWAL && !runOpenStatement("PRAGMA journal_mode=WAL"))
-        return false;
-
-    if (opts.queryOnly && !runOpenStatement("PRAGMA query_only=ON"))
+    // Not part of the sequence: a reader stays a reader whatever the caller asked for.
+    if (opts.queryOnly && !runOpenStatement("query_only", "PRAGMA query_only=ON"))
         return false;
 
     return true;
 }
 
-bool SQLiteConnection::runOpenStatement(const std::string& sql) {
+bool SQLiteConnection::runOpenStatement(const std::string& what, const std::string& sql,
+                                        const std::string* secret) {
     char* errmsg = nullptr;
     int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &errmsg);
     if (rc == SQLITE_OK) {
@@ -130,7 +160,11 @@ bool SQLiteConnection::runOpenStatement(const std::string& sql) {
     }
     std::string msg = errmsg ? errmsg : sqlite3_errmsg(db_);
     sqlite3_free(errmsg);
-    setError(msg, rc);
+    // SQLite quotes the offending token back in a few of its messages, and the key
+    // is one thing that may never be quoted back.
+    if (secret && !secret->empty() && msg.find(*secret) != std::string::npos)
+        msg = kKeyStepFailedMessage;
+    setError(what + " failed: " + msg, rc);
     close();
     return false;
 }
@@ -154,7 +188,10 @@ void SQLiteConnection::close() {
 }
 
 QueryResult SQLiteConnection::unavailableError() const {
-    if (openFailed_) return openError_;
+    {
+        std::lock_guard<std::mutex> lk(errorMutex_);
+        if (openFailed_) return openError_;
+    }
     QueryResult r;
     r.success   = false;
     r.error     = "database is closed";
