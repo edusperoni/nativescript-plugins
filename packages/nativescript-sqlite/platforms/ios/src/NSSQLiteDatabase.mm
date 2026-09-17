@@ -10,6 +10,11 @@
 // MARK: - Open Failure
 
 /// A failed step of opening a connection, captured before the handle is closed.
+// sqlite3_extended_result_codes is on, so sqlite3_errcode returns the extended
+// form. SQLiteError.code is documented as the primary code (SQLITE_CONSTRAINT,
+// not SQLITE_CONSTRAINT_UNIQUE); extendedCode carries the rest.
+static inline int primaryCode(int code) { return code & 0xFF; }
+
 struct OpenFailure {
     int code = SQLITE_OK;
     int extendedCode = SQLITE_OK;
@@ -132,7 +137,7 @@ public:
         if (rc != SQLITE_OK) {
             // sqlite3_open_v2 still hands back a handle on most failures, and the
             // message only lives on that handle — so read it before closing.
-            outError.code = rc;
+            outError.code = primaryCode(rc);
             outError.extendedCode = db_ ? sqlite3_extended_errcode(db_) : rc;
             outError.message = db_ ? sqlite3_errmsg(db_) : "out of memory allocating the database handle";
             if (db_) { sqlite3_close(db_); db_ = nullptr; }
@@ -176,7 +181,7 @@ public:
         }
     }
 
-    int lastErrorCode() const { return db_ ? sqlite3_errcode(db_) : SQLITE_ERROR; }
+    int lastErrorCode() const { return db_ ? primaryCode(sqlite3_errcode(db_)) : SQLITE_ERROR; }
     int lastExtendedErrorCode() const { return db_ ? sqlite3_extended_errcode(db_) : SQLITE_ERROR; }
     const char *lastErrorMsg() const { return db_ ? sqlite3_errmsg(db_) : "Database not open"; }
 
@@ -196,7 +201,7 @@ private:
         char *errMsg = nullptr;
         int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &errMsg);
         if (rc != SQLITE_OK) {
-            outError.code = rc;
+            outError.code = primaryCode(rc);
             outError.extendedCode = sqlite3_extended_errcode(db_);
             outError.message = errMsg ? errMsg : sqlite3_errmsg(db_);
             if (errMsg) sqlite3_free(errMsg);
