@@ -144,7 +144,9 @@ export function resolveOpenSequence(options: DatabaseOptions): NativeOpenStep[] 
 		if (typeof sql !== 'string') {
 			throw new SQLiteError(`openSequence[${i}]: expected SQL, { sql, on }, OpenStep.key or OpenStep.wal`, SQLITE_MISUSE);
 		}
-		if (sql.length > 0) steps.push({ kind: STEP_SQL, scope: scopeCode((entry as { on?: OpenStepScope }).on, i), sql });
+		// Validated even when the statement is empty, so a typo in `on` is still caught.
+		const scope = scopeCode((entry as { on?: OpenStepScope }).on, i);
+		if (sql.length > 0) steps.push({ kind: STEP_SQL, scope, sql });
 	}
 
 	if (options.encryptionKey) {
