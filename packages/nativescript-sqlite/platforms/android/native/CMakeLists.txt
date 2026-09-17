@@ -16,13 +16,11 @@ if(NOT NSCSQLITE_BACKEND STREQUAL "v8" AND NOT NSCSQLITE_BACKEND STREQUAL "napi"
     message(FATAL_ERROR "Unknown NSCSQLITE_BACKEND: ${NSCSQLITE_BACKEND} (expected v8 or napi)")
 endif()
 
-message(STATUS "Using runtime backend: ${NSCSQLITE_BACKEND}")
-
 if(NSCSQLITE_BACKEND STREQUAL "v8" AND (NOT DEFINED V8_INCLUDE_DIR OR NOT EXISTS "${V8_INCLUDE_DIR}/v8.h"))
     message(FATAL_ERROR
         "V8_INCLUDE_DIR must point at the public V8 headers (no v8.h under "
         "'${V8_INCLUDE_DIR}'). include.gradle downloads them from the release "
-        "pinned in native/v8-headers.properties; pass -Pnscsqlite.v8IncludeDir=<dir> "
+        "pinned in native/downloads.properties; pass -Pnscsqlite.v8IncludeDir=<dir> "
         "to use a local copy instead.")
 endif()
 
@@ -56,46 +54,62 @@ endif()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COMMON_CMAKE_ARGUMENTS}")
 
-# SQLite Implementation Selection
-if(NOT DEFINED MYLIB_SQLITE_IMPL)
-    set(MYLIB_SQLITE_IMPL "bundled")
+# SQLite selection.  The two presets under sqlite/ are in-repo instances of the
+# contract an app-provided directory satisfies, so all three cases below are the
+# same code path: configure a directory, require the target it must define.
+if(NOT DEFINED NSCSQLITE_SQLITE OR NSCSQLITE_SQLITE STREQUAL "")
+    set(NSCSQLITE_SQLITE "bundled")
 endif()
 
-message(STATUS "Using SQLite implementation: ${MYLIB_SQLITE_IMPL}")
-
-if(MYLIB_SQLITE_IMPL STREQUAL "bundled")
-    add_subdirectory(third_party/sqlite)
-    set(SQLITE_TARGET SQLite::SQLite3)
-    
-elseif(MYLIB_SQLITE_IMPL STREQUAL "sqlcipher")
-    add_subdirectory(third_party/sqlcipher)
-    set(SQLITE_TARGET SQLite::SQLite3)
-
-elseif(MYLIB_SQLITE_IMPL STREQUAL "custom")
-    set(_abi_lib_dir "${MYLIB_SQLITE_LIB_DIR}/${ANDROID_ABI}")
-    
-    find_library(SQLITE_CUSTOM_LIB
-        NAMES ${MYLIB_SQLITE_LIB_NAME}
-        PATHS ${_abi_lib_dir}
-        NO_DEFAULT_PATH
-        REQUIRED
-    )
-    
-    add_library(sqlite_custom SHARED IMPORTED)
-    set_target_properties(sqlite_custom PROPERTIES
-        IMPORTED_LOCATION ${SQLITE_CUSTOM_LIB}
-        INTERFACE_INCLUDE_DIRECTORIES ${MYLIB_SQLITE_INCLUDE_DIR}
-    )
-    
-    set(SQLITE_TARGET sqlite_custom)
-    
+if(NSCSQLITE_SQLITE STREQUAL "project")
+    if(NOT DEFINED NSCSQLITE_SQLITE_PROJECT_DIR OR NSCSQLITE_SQLITE_PROJECT_DIR STREQUAL "")
+        message(FATAL_ERROR "NSCSQLITE_SQLITE=project requires NSCSQLITE_SQLITE_PROJECT_DIR")
+    endif()
+    if(NOT EXISTS "${NSCSQLITE_SQLITE_PROJECT_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR
+            "No CMakeLists.txt under NSCSQLITE_SQLITE_PROJECT_DIR="
+            "'${NSCSQLITE_SQLITE_PROJECT_DIR}'")
+    endif()
+    set(_sqlite_dir "${NSCSQLITE_SQLITE_PROJECT_DIR}")
+    set(_sqlite_label "project (${NSCSQLITE_SQLITE_PROJECT_DIR})")
+elseif(NSCSQLITE_SQLITE STREQUAL "bundled" OR NSCSQLITE_SQLITE STREQUAL "sqlite3mc")
+    set(_sqlite_dir "${CMAKE_CURRENT_SOURCE_DIR}/sqlite/${NSCSQLITE_SQLITE}")
+    set(_sqlite_label "${NSCSQLITE_SQLITE}")
+elseif(NSCSQLITE_SQLITE STREQUAL "sqlcipher")
+    message(FATAL_ERROR
+        "NSCSQLITE_SQLITE=sqlcipher has been removed. Use sqlite3mc, which reads and "
+        "writes SQLCipher 4 databases and needs no OpenSSL (README: 'Choosing the SQLite "
+        "build'), or build SQLCipher itself through NSCSQLITE_SQLITE_PROJECT_DIR (README: "
+        "'Bringing your own SQLite').")
+elseif(NSCSQLITE_SQLITE STREQUAL "custom")
+    message(FATAL_ERROR
+        "NSCSQLITE_SQLITE=custom has been removed. Point NSCSQLITE_SQLITE_PROJECT_DIR at a "
+        "directory whose CMakeLists.txt defines a target named 'nscsqlite_sqlite'; an "
+        "IMPORTED target wraps a prebuilt library in five lines (README: 'Bringing your own "
+        "SQLite').")
 else()
-    message(FATAL_ERROR "Unknown SQLite implementation: ${MYLIB_SQLITE_IMPL}")
+    message(FATAL_ERROR
+        "Unknown NSCSQLITE_SQLITE: ${NSCSQLITE_SQLITE} (expected bundled, sqlite3mc or project)")
 endif()
+
+# An out-of-tree source directory has no place of its own under the build tree,
+# so add_subdirectory needs the binary directory spelled out.
+add_subdirectory("${_sqlite_dir}" "${CMAKE_CURRENT_BINARY_DIR}/sqlite")
+
+if(NOT TARGET nscsqlite_sqlite)
+    message(FATAL_ERROR
+        "'${_sqlite_dir}/CMakeLists.txt' did not define a target named 'nscsqlite_sqlite'. "
+        "It must define one (STATIC, SHARED or IMPORTED) carrying a PUBLIC include "
+        "directory that holds sqlite3.h, its compile definitions, and its link "
+        "dependencies as PUBLIC.")
+endif()
+
+message(STATUS "nscsqlite: backend=${NSCSQLITE_BACKEND} sqlite=${_sqlite_label}")
 
 # Source files — listed per backend rather than globbed so a napi build never
 # pulls a V8 translation unit in, and vice versa.
 set(SOURCES
+    src/sqlite_abi_check.cpp
     src/common/sqlite_connection.cpp
     src/async/thread_pool.cpp
 )
@@ -142,6 +156,14 @@ set_target_properties(
     POSITION_INDEPENDENT_CODE ON
 )
 
+# --exclude-libs keeps the engine's symbols out of the dynamic table, so an app
+# that also links another SQLite cannot bind to this one, or this one to it.
+# NDK 27 still links with max-page-size=4096, which Play rejects for API 35+.
+target_link_options(nscsqlite PRIVATE
+    "-Wl,--exclude-libs,ALL"
+    "-Wl,-z,max-page-size=16384"
+)
+
 find_library(system-log log)
 
 # NativeScript runtime stub — provides V8 symbols at link time so the dynamic
@@ -169,6 +191,6 @@ add_custom_command(TARGET nscsqlite POST_BUILD COMMAND ${CMAKE_STRIP} --strip-un
 target_link_libraries(nscsqlite
     ${system-log}
     NativeScript
-    ${SQLITE_TARGET}
+    nscsqlite_sqlite
     android
 )

@@ -1,34 +1,96 @@
-// Gradle refuses -P properties with a dot through the environment, so the
-// backend also accepts NSCSQLITE_BACKEND for CI and scripted builds.
-def backend = project.hasProperty('nscsqlite.backend')
-              ? project.property('nscsqlite.backend').toString()
-              : (System.getenv('NSCSQLITE_BACKEND') ?: 'v8')
+// Every option also reads an environment variable, because the NativeScript CLI
+// forwards only one -P reliably and Gradle refuses dotted property names from
+// the environment.  Precedence: -P property, environment, default.
+def prop = { String name, String env, String fallback = null ->
+    def value = project.hasProperty(name) ? project.property(name).toString().trim() : null
+    if ((value == null || value.isEmpty()) && env != null) {
+        value = System.getenv(env)?.trim()
+    }
+    (value == null || value.isEmpty()) ? fallback : value
+}
+
+def backend = prop('nscsqlite.backend', 'NSCSQLITE_BACKEND', 'v8')
 
 if (backend != 'v8' && backend != 'napi') {
     throw new GradleException("nscsqlite.backend must be 'v8' or 'napi', got '${backend}'")
 }
 
-def sqliteImpl = project.hasProperty('nscsqlite.sqliteImpl')
-                 ? project.property('nscsqlite.sqliteImpl')
-                 : 'bundled'
+def sqlite = prop('nscsqlite.sqlite', 'NSCSQLITE_SQLITE',
+                  prop('nscsqlite.sqliteImpl', null))
+def sqliteExplicit = sqlite != null
+if (!sqliteExplicit) {
+    sqlite = 'bundled'
+}
 
-def sqliteIncludeDir = project.hasProperty('nscsqlite.sqliteIncludeDir')
-                       ? project.property('nscsqlite.sqliteIncludeDir')
-                       : ''
+if (sqlite == 'sqlcipher') {
+    throw new GradleException(
+        "nscsqlite.sqlite=sqlcipher has been removed. Use nscsqlite.sqlite=sqlite3mc: it " +
+        "reads and writes SQLCipher 4 databases through the same encryptionKey options, " +
+        "and needs no OpenSSL. See 'Choosing the SQLite build' in the @nativescript/sqlite " +
+        "README. To keep SQLCipher itself, build it through nscsqlite.sqliteProjectDir " +
+        "('Bringing your own SQLite').")
+}
 
-def sqliteLibDir = project.hasProperty('nscsqlite.sqliteLibDir')
-                   ? project.property('nscsqlite.sqliteLibDir')
-                   : ''
+if (sqlite == 'custom') {
+    throw new GradleException(
+        "nscsqlite.sqlite=custom has been removed, together with nscsqlite.sqliteIncludeDir, " +
+        "nscsqlite.sqliteLibDir and nscsqlite.sqliteLibName. Point nscsqlite.sqliteProjectDir " +
+        "at a directory whose CMakeLists.txt defines a target named 'nscsqlite_sqlite'; an " +
+        "IMPORTED target wraps a prebuilt library in five lines. See 'Bringing your own " +
+        "SQLite' in the @nativescript/sqlite README.")
+}
 
-def sqliteLibName = project.hasProperty('nscsqlite.sqliteLibName')
-                    ? project.property('nscsqlite.sqliteLibName')
-                    : 'sqlite3'
+if (sqlite != 'bundled' && sqlite != 'sqlite3mc') {
+    throw new GradleException(
+        "nscsqlite.sqlite must be 'bundled' or 'sqlite3mc', got '${sqlite}'")
+}
 
-def sqliteFlags = project.hasProperty('nscsqlite.sqliteFlags')
-                  ? project.property('nscsqlite.sqliteFlags')
-                  : ''
+def sqliteFlags = prop('nscsqlite.sqliteFlags', 'NSCSQLITE_SQLITE_FLAGS', '')
 
 def pluginNativeDir = new File(buildscript.sourceFile.parentFile, "native")
+
+// The directory holding the app's package.json; a relative sqliteProjectDir is
+// read from there, the way nsconfig paths are.
+def appRoot = project.hasProperty('USER_PROJECT_ROOT')
+              ? new File(project.property('USER_PROJECT_ROOT').toString())
+              : project.rootProject.projectDir
+
+// An app-provided CMake directory, either named outright or found at the
+// convention location.  Either one replaces the preset entirely.
+def sqliteProjectDir = null
+def sqliteProjectOrigin = null
+
+def sqliteProjectProp = prop('nscsqlite.sqliteProjectDir', 'NSCSQLITE_SQLITE_PROJECT_DIR')
+if (sqliteProjectProp != null) {
+    def dir = new File(sqliteProjectProp)
+    sqliteProjectDir = (dir.isAbsolute() ? dir : new File(appRoot, sqliteProjectProp))
+                       .canonicalFile
+    sqliteProjectOrigin = "nscsqlite.sqliteProjectDir=${sqliteProjectProp}"
+    if (!new File(sqliteProjectDir, 'CMakeLists.txt').exists()) {
+        throw new GradleException(
+            "${sqliteProjectOrigin} resolves to '${sqliteProjectDir}', which contains no " +
+            "CMakeLists.txt. A relative path is resolved against the app root " +
+            "('${appRoot}').")
+    }
+} else if (project.hasProperty('getAppResourcesPath')) {
+    // The app template's no-argument closure on the root project; the
+    // one-argument one in gradle-helpers/paths.gradle is shadowed by it.
+    def appResources = project.property('getAppResourcesPath')().toString()
+    def conventional = new File(appResources, 'Android/nscsqlite')
+    if (new File(conventional, 'CMakeLists.txt').exists()) {
+        sqliteProjectDir = conventional.canonicalFile
+        sqliteProjectOrigin = "App_Resources/Android/nscsqlite"
+    }
+}
+
+if (sqliteProjectDir != null && sqliteExplicit) {
+    throw new GradleException(
+        "nscsqlite: an app-provided SQLite build (${sqliteProjectOrigin}) and the preset " +
+        "nscsqlite.sqlite=${sqlite} are both configured, and they select different SQLite " +
+        "engines. Remove one of them: drop nscsqlite.sqlite to build the app-provided " +
+        "directory, or remove that directory (or unset nscsqlite.sqliteProjectDir) to build " +
+        "the preset.")
+}
 
 def sha256Of(File file) {
     def digest = java.security.MessageDigest.getInstance("SHA-256")
@@ -42,7 +104,7 @@ def sha256Of(File file) {
     return digest.digest().collect { String.format("%02x", it) }.join()
 }
 
-def downloadV8Headers(String url, File target) {
+def downloadTo(String url, File target) {
     def part = new File(target.parentFile, "${target.name}.${UUID.randomUUID()}.part")
     part.parentFile.mkdirs()
 
@@ -58,86 +120,114 @@ def downloadV8Headers(String url, File target) {
         java.nio.file.StandardCopyOption.REPLACE_EXISTING)
 }
 
-// Resolves the public V8 headers the plugin compiles against.  They are not
-// vendored: the version must track the V8 embedded in @nativescript/android,
-// pinned in native/v8-headers.properties.
+// Resolves one artifact pinned in native/downloads.properties to its extracted
+// directory, downloading and caching it on first use.
 //
 // Runs at configuration time because the resolved path has to be part of the
 // app's externalNativeBuild CMake arguments, which are read while the variant
 // is configured.  Everything after the first build is a single file-exists
 // check.
-def resolveV8IncludeDir(project, File nativeDir) {
-    if (project.hasProperty('nscsqlite.v8IncludeDir')) {
-        def userDir = new File(project.property('nscsqlite.v8IncludeDir').toString())
-        if (!new File(userDir, "v8.h").exists()) {
-            throw new GradleException(
-                "nscsqlite.v8IncludeDir=${userDir} does not contain v8.h")
-        }
-        return userDir
+def resolveArtifact(project, File cacheRoot, Properties pins, String name) {
+    def id = pins.getProperty("${name}.id")
+    def marker = pins.getProperty("${name}.marker")
+    def artifactCache = new File(cacheRoot, name)
+    def targetDir = new File(artifactCache, id)
+    if (new File(targetDir, marker).exists()) {
+        return targetDir
     }
 
-    def props = new Properties()
-    def propsFile = new File(nativeDir, "v8-headers.properties")
-    propsFile.withInputStream { props.load(it) }
-    def release = props.getProperty('release')
-    def asset = props.getProperty('asset')
-    def expectedSha = props.getProperty('sha256')
-    def url = "${props.getProperty('baseUrl')}/${release}/${asset}"
+    def url = pins.getProperty("${name}.url")
+    def expectedSha = pins.getProperty("${name}.sha256")
+    def archive = new File(artifactCache, url.substring(url.lastIndexOf('/') + 1))
 
-    def cacheRoot = project.hasProperty('nscsqlite.v8HeadersCacheDir')
-                    ? new File(project.property('nscsqlite.v8HeadersCacheDir').toString())
-                    : new File(project.gradle.gradleUserHomeDir, "nscsqlite/v8-headers")
-
-    def releaseDir = new File(cacheRoot, release)
-    def includeDir = new File(releaseDir, "include")
-    if (new File(includeDir, "v8.h").exists()) {
-        return includeDir
-    }
-
-    def archive = new File(cacheRoot, asset)
     if (!archive.exists() || sha256Of(archive) != expectedSha) {
-        project.logger.lifecycle("[nscsqlite] Downloading V8 headers ${release}")
-        downloadV8Headers(url, archive)
+        project.logger.lifecycle("[nscsqlite] Downloading ${name} ${id}")
+        downloadTo(url, archive)
     }
 
     def actualSha = sha256Of(archive)
     if (actualSha != expectedSha) {
         archive.delete()
         throw new GradleException(
-            "V8 header archive ${asset} failed checksum verification " +
-            "(expected ${expectedSha}, got ${actualSha}); the download was discarded")
+            "[nscsqlite] ${archive.name} failed checksum verification (expected " +
+            "${expectedSha}, got ${actualSha}); the download was discarded. It was fetched " +
+            "from ${url}, pinned in native/downloads.properties.")
     }
+
+    def tree = pins.getProperty("${name}.archive") == 'zip'
+               ? project.zipTree(archive)
+               : project.tarTree(project.resources.gzip(archive))
+    def pattern = pins.getProperty("${name}.include")
+    def strip = (pins.getProperty("${name}.strip") ?: '0') as int
 
     // Extract to a private directory and move it into place, so a killed build
     // can never leave a half-populated cache entry behind.
-    def stagingDir = new File(cacheRoot, "${release}.tmp-${UUID.randomUUID()}")
+    def stagingDir = new File(artifactCache, "${id}.tmp-${UUID.randomUUID()}")
     project.copy {
-        from(project.tarTree(project.resources.gzip(archive))) {
-            include '*/include/**'
+        from(tree) {
+            if (pattern) {
+                include pattern
+            }
             includeEmptyDirs = false
-            eachFile { details ->
-                details.relativePath = new org.gradle.api.file.RelativePath(
-                    true, details.relativePath.segments.drop(1) as String[])
+            if (strip > 0) {
+                eachFile { details ->
+                    details.relativePath = new org.gradle.api.file.RelativePath(
+                        true, details.relativePath.segments.drop(strip) as String[])
+                }
             }
         }
         into stagingDir
     }
 
-    project.delete(releaseDir)
+    project.delete(targetDir)
     try {
-        java.nio.file.Files.move(stagingDir.toPath(), releaseDir.toPath())
+        java.nio.file.Files.move(stagingDir.toPath(), targetDir.toPath())
     } catch (java.io.IOException e) {
         project.delete(stagingDir)
-        if (!new File(includeDir, "v8.h").exists()) {
+        if (!new File(targetDir, marker).exists()) {
             throw new GradleException(
-                "Failed to populate the V8 header cache at ${releaseDir}", e)
+                "[nscsqlite] Failed to populate the ${name} cache at ${targetDir}", e)
         }
     }
 
-    return includeDir
+    return targetDir
 }
 
-def v8IncludeDir = backend == 'v8' ? resolveV8IncludeDir(project, pluginNativeDir) : null
+def downloadPins = new Properties()
+new File(pluginNativeDir, "downloads.properties").withInputStream { downloadPins.load(it) }
+
+def cacheRoot = new File(prop('nscsqlite.cacheDir', 'NSCSQLITE_CACHE_DIR')
+                         ?: new File(project.gradle.gradleUserHomeDir, "nscsqlite").path)
+
+def v8IncludeDir = null
+if (backend == 'v8') {
+    def override = prop('nscsqlite.v8IncludeDir', 'NSCSQLITE_V8_INCLUDE_DIR')
+    if (override != null) {
+        v8IncludeDir = new File(override)
+        if (!new File(v8IncludeDir, "v8.h").exists()) {
+            throw new GradleException(
+                "nscsqlite.v8IncludeDir=${v8IncludeDir} does not contain v8.h")
+        }
+    } else {
+        v8IncludeDir = new File(
+            resolveArtifact(project, cacheRoot, downloadPins, 'v8-headers'), "include")
+    }
+}
+
+def sqliteSourceDir = null
+if (sqliteProjectDir == null) {
+    def override = prop('nscsqlite.sqliteSourceDir', 'NSCSQLITE_SQLITE_SOURCE_DIR')
+    if (override != null) {
+        sqliteSourceDir = new File(override)
+        if (!sqliteSourceDir.isDirectory()) {
+            throw new GradleException(
+                "nscsqlite.sqliteSourceDir=${sqliteSourceDir} is not a directory")
+        }
+    } else {
+        sqliteSourceDir = resolveArtifact(project, cacheRoot, downloadPins,
+                                          sqlite == 'bundled' ? 'sqlite' : sqlite)
+    }
+}
 
 def findNsAndroidDir(project) {
     def dir = project.rootProject.projectDir
@@ -190,12 +280,15 @@ if (nsAndroidDir) {
 
 def cmakeArgs = [
     "-DNSCSQLITE_BACKEND=${backend}",
-    "-DMYLIB_SQLITE_IMPL=${sqliteImpl}",
-    "-DMYLIB_SQLITE_INCLUDE_DIR=${sqliteIncludeDir}",
-    "-DMYLIB_SQLITE_LIB_DIR=${sqliteLibDir}",
-    "-DMYLIB_SQLITE_LIB_NAME=${sqliteLibName}",
-    "-DMYLIB_SQLITE_FLAGS=${sqliteFlags}"
+    "-DNSCSQLITE_SQLITE=${sqliteProjectDir != null ? 'project' : sqlite}",
+    "-DNSCSQLITE_SQLITE_FLAGS=${sqliteFlags}"
 ]
+
+if (sqliteProjectDir != null) {
+    cmakeArgs << "-DNSCSQLITE_SQLITE_PROJECT_DIR=${sqliteProjectDir.absolutePath}"
+} else {
+    cmakeArgs << "-DNSCSQLITE_SQLITE_SOURCE_DIR=${sqliteSourceDir.absolutePath}"
+}
 
 if (v8IncludeDir) {
     cmakeArgs << "-DV8_INCLUDE_DIR=${v8IncludeDir.absolutePath}"
@@ -203,10 +296,6 @@ if (v8IncludeDir) {
 
 if (nsStubsDir) {
     cmakeArgs << "-DNS_LIBS_DIR=${nsStubsDir}"
-}
-
-if (sqliteImpl == 'sqlcipher') {
-    cmakeArgs << "-DANDROID_STL=c++_shared"
 }
 
 android {
@@ -226,17 +315,9 @@ android {
 
     // The napi backend takes its Node-API headers from the runtime AAR's
     // header-only Prefab package.
-    if (sqliteImpl == 'sqlcipher' || backend == 'napi') {
+    if (backend == 'napi') {
         buildFeatures {
             prefab true
         }
-    }
-}
-
-if (sqliteImpl == 'sqlcipher') {
-    dependencies {
-        // OpenSSL provided via Android NDK prefab; consumed by CMake as openssl::crypto
-        // TODO: Use LibTomCrypt instead of OpenSSL
-        implementation 'com.android.ndk.thirdparty:openssl:1.1.1q-beta-1'
     }
 }
