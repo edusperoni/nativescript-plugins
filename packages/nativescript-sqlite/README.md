@@ -628,7 +628,7 @@ const db = openDatabase({
 
 What you should know about it:
 
-- **It produces SQLCipher 4 files.** The preset is compiled with `CODEC_TYPE=CODEC_TYPE_SQLCIPHER` and `SQLITE3MC_USE_SQLCIPHER_LEGACY`, which makes a plain `PRAGMA key` read and write SQLCipher 4 databases. A database created here opens under `pod 'SQLCipher'` on iOS and vice versa, with passphrases and with raw keys, so one encrypted file can be shared across both platforms of the same app. This was verified against SQLCipher 4.16.0 at its default settings, on a host build, covering ordinary tables, FTS5 and non-ASCII text; SQLCipher's non-default cipher settings and WAL mode were not part of that test.
+- **It produces SQLCipher 4 files.** The preset is compiled with `CODEC_TYPE=CODEC_TYPE_SQLCIPHER` and `SQLITE3MC_USE_SQLCIPHER_LEGACY`, which makes a plain `PRAGMA key` read and write SQLCipher 4 databases. A database created here opens under `pod 'SQLCipher'` on iOS and vice versa, with passphrases and with raw keys, so one encrypted file can be shared across both platforms of the same app. This was verified against SQLCipher 4.16.0 at its default settings in both directions — on a host build, and on an Android emulator through this plugin in WAL mode with the writer and reader pool active — covering ordinary tables, FTS5 and non-ASCII text. SQLCipher's non-default cipher settings were not part of that test.
 - **It brings its own crypto.** No OpenSSL, no Prefab dependency, no extra `.so` in the APK. Hardware AES on arm64 is detected at run time, with no compiler flags — forcing `-maes`-style flags actually breaks armeabi-v7a.
 - **Passphrase or raw key** work exactly as on iOS, through `encryptionKeyFormat`. See [Passphrase vs raw key](#passphrase-vs-raw-key) — that section applies verbatim here.
 - **Key derivation is paid per connection.** The writer's is paid by `openDatabase()`; the readers' are paid on their own threads. See [The cost of a passphrase](#the-cost-of-a-passphrase) below — it is the single most important thing to know before shipping this.
@@ -643,14 +643,14 @@ What matters is *where* they run. Readers are opened by their own threads, so on
 
 Measured on an emulator with the `sqlite3mc` preset in SQLCipher-legacy mode, `poolSize: 4`:
 
-| | before this change | now |
-|---|---|---|
-| `openDatabase()` with a passphrase (JS thread blocked) | ≈ 582 ms | **93 ms** |
-| first pooled read afterwards | — | ≈ 92 ms |
-| `openDatabase()` with a raw key | 0.66 ms | **0.67 ms** |
-| `openDatabase()` with no key | ≈ 2.5 ms | ≈ 3.4 ms |
+| | JavaScript thread blocked |
+|---|---|
+| `openDatabase()` with a passphrase | ≈ 93 ms (one derivation) |
+| the first read routed to each reader | ≈ 92 ms of latency, once per reader, off the JavaScript thread |
+| `openDatabase()` with a raw key | ≈ 0.7 ms |
+| `openDatabase()` with no key | ≈ 3.4 ms |
 
-Read that honestly: the derivations did not get faster, they moved. The JavaScript thread now pays **one** instead of six — the four readers derive on their own threads, and the sixth connection, the old dedicated sync one, no longer exists. The readers' cost has not vanished; it reappears as ≈ 92 ms of latency on the **first read routed to each reader**, once per reader. Trading a frozen UI for a slow first query is almost always the right trade, but it is a trade.
+Read that honestly: the readers' derivations are not free, they are somewhere else. Keying all five connections on the JavaScript thread would block it for roughly half a second; instead it pays for **one**, and the rest shows up as ≈ 92 ms of latency on the **first read routed to each reader**. Trading a frozen UI for a slow first query is almost always the right trade, but it is a trade.
 
 These are emulator numbers, not device numbers; treat the shape as real and the absolute values as indicative.
 
