@@ -6,7 +6,7 @@
 	},
 	"$schema": "./node_modules/nx/schemas/nx-schema.json",
 	"pluginsConfig": {
-		"@nrwl/js": {
+		"@nx/js": {
 			"analyzeSourceFiles": true
 		}
 	},

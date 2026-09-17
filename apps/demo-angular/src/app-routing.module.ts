@@ -10,6 +10,7 @@ const routes: Routes = [
 	{ path: 'nativescript-mqtt', loadChildren: () => import('./plugin-demos/nativescript-mqtt.module').then((m) => m.NativescriptMqttModule) },
 	{ path: 'nativescript-ripple', loadChildren: () => import('./plugin-demos/nativescript-ripple.module').then((m) => m.NativescriptRippleModule) },
 	{ path: 'nativescript-sms-inbox', loadChildren: () => import('./plugin-demos/nativescript-sms-inbox.module').then((m) => m.NativescriptSmsInboxModule) },
+	{ path: 'nativescript-sqlite', loadChildren: () => import('./plugin-demos/nativescript-sqlite.module').then((m) => m.NativescriptSqliteModule) },
 	{ path: 'nativescript-supabase', loadChildren: () => import('./plugin-demos/nativescript-supabase.module').then((m) => m.NativescriptSupabaseModule) },
 ];
 

@@ -1,0 +1,65 @@
+{
+	"name": "nativescript-sqlite",
+	"$schema": "../../node_modules/nx/schemas/project-schema.json",
+	"projectType": "library",
+	"sourceRoot": "packages/nativescript-sqlite",
+	"targets": {
+		"build": {
+			"executor": "@nx/js:tsc",
+			"options": {
+				"outputPath": "dist/packages/nativescript-sqlite",
+				"tsConfig": "packages/nativescript-sqlite/tsconfig.json",
+				"packageJson": "packages/nativescript-sqlite/package.json",
+				"main": "packages/nativescript-sqlite/index.d.ts",
+				"assets": [
+					"packages/nativescript-sqlite/*.md",
+					"packages/nativescript-sqlite/index.d.ts",
+					"LICENSE",
+					{
+						"glob": "**/*",
+						"input": "packages/nativescript-sqlite/platforms/",
+						"output": "./platforms/"
+					}
+				],
+				"dependsOn": [
+					{
+						"target": "build.all",
+						"projects": "dependencies"
+					}
+				]
+			}
+		},
+		"build.all": {
+			"executor": "nx:run-commands",
+			"options": {
+				"commands": ["node tools/scripts/build-finish.ts nativescript-sqlite"],
+				"parallel": false
+			},
+			"outputs": ["{workspaceRoot}/dist/packages/nativescript-sqlite"],
+			"dependsOn": [
+				{
+					"target": "build.all",
+					"projects": "dependencies"
+				},
+				{
+					"target": "build",
+					"projects": "self"
+				}
+			]
+		},
+		"focus": {
+			"executor": "nx:run-commands",
+			"options": {
+				"commands": ["nx g @nativescript/plugin-tools:focus-packages nativescript-sqlite"],
+				"parallel": false
+			}
+		},
+		"lint": {
+			"executor": "@nx/eslint:lint",
+			"options": {
+				"lintFilePatterns": ["packages/nativescript-sqlite/**/*.ts"]
+			}
+		}
+	},
+	"tags": []
+}
