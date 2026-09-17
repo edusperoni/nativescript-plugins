@@ -5,6 +5,7 @@
 #include "../runtime/v8/v8_helpers.h"
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -30,6 +31,20 @@ namespace NSCSQLite
             "a transaction is active on this database; use the transaction object's "
             "executeSync, or pass { joinTransaction: true } to run inside it";
 
+        // What becomes of a call parked before the readers were ready.  Drop is the
+        // teardown that cannot settle anything — the GC path, where the JS object is
+        // already unreachable.
+        enum class PendingAction
+        {
+            Dispatch,
+            Fail,
+            Drop
+        };
+
+        // A parked call, carrying its own resolver.  The QueryResult is read for
+        // Fail and ignored otherwise.
+        using PendingRead = std::function<void(PendingAction, const QueryResult &)>;
+
         // Every connection is SQLITE_OPEN_NOMUTEX: each one belongs to a dispatcher,
         // and that dispatcher is what serializes the worker thread and the JS thread
         // against each other.  WAL mode (set on the writer) lets readers proceed
@@ -45,6 +60,20 @@ namespace NSCSQLite
             std::vector<std::unique_ptr<SQLiteConnection>> readerDbs;
             std::vector<std::unique_ptr<AndroidDispatcher>> readerDispatchers;
             std::atomic<int> readerIndex{0};
+
+            // The readers' options, kept because their opens are dispatched only
+            // once the writer's has succeeded.
+            OpenOptions readerOpts{};
+            // Set by Teardown: no reader open may be dispatched after it. Both it
+            // and the completion that reads it run on the JS thread, so the two
+            // cannot interleave.
+            bool closing{false};
+            // True once the reader opens have been dispatched. Until then a reader
+            // dispatcher is idle, so a call routed to one is parked rather than run
+            // against a connection that is not open yet. JS thread only, like
+            // everything else in this block, so neither needs a lock.
+            bool readersReady{false};
+            std::vector<PendingRead> pendingReads;
 
             std::unique_ptr<V8RuntimeAdapter> adapter;
             v8::Isolate *isolate;
@@ -76,6 +105,9 @@ namespace NSCSQLite
                     waiter->Reset();
                     delete waiter;
                 }
+                QueryResult unused;
+                for (auto &parked : pendingReads)
+                    parked(PendingAction::Drop, unused);
             }
         };
 
@@ -108,6 +140,17 @@ namespace NSCSQLite
             return res;
         }
 
+        // Settles the calls parked before the readers were ready: dispatching them
+        // now that a reader can take them, or failing them with the error that
+        // stopped the readers opening.
+        static void FlushPendingReads(DBInstance *instance, PendingAction action, const QueryResult &error)
+        {
+            auto parked = std::move(instance->pendingReads);
+            instance->pendingReads.clear();
+            for (auto &item : parked)
+                item(action, error);
+        }
+
         // Closes every connection on its own dispatcher and frees the instance
         // once all of them are done.  persistentResolver is null on the GC path.
         // Each dispatcher is a single FIFO thread whose completions drain in
@@ -123,6 +166,19 @@ namespace NSCSQLite
         static void Teardown(DBInstance *instance, v8::Persistent<v8::Promise::Resolver> *persistentResolver)
         {
             instance->self.Reset();
+            instance->closing = true;
+
+            // Parked work has to settle before the instance can be freed.  A null
+            // resolver is the GC path, where V8 forbids allocating and nothing can
+            // be awaiting these anyway: ~DBInstance drops them instead.
+            if (persistentResolver)
+            {
+                QueryResult closed;
+                closed.success = false;
+                closed.error = "database is closed";
+                closed.errorCode = SQLITE_MISUSE;
+                FlushPendingReads(instance, PendingAction::Fail, closed);
+            }
 
             // A span left open — close() called from inside a transactionSync
             // callback — would keep the writer claimed, so the close below could
@@ -294,6 +350,17 @@ namespace NSCSQLite
             instance->adapter->reject(resolver, instance->openError.error, instance->openError.errorCode);
         }
 
+        static void DispatchReaderOpens(DBInstance *instance);
+
+        // A reader the pool never started must not answer with "database is
+        // closed": every method on a failed-open database reports the same error,
+        // whichever connection it would have been routed to.
+        static void StampWriterFailureOnReaders(DBInstance *instance, const QueryResult &error)
+        {
+            for (auto &reader : instance->readerDbs)
+                reader->recordOpenFailure(error);
+        }
+
         // Runs on the JS thread, from an open task's completion. `order` is the
         // connection's place in writer-then-reader order, so that the failure
         // reported is the first one regardless of which open finishes first.
@@ -303,6 +370,35 @@ namespace NSCSQLite
             {
                 instance->openFailedOrder = order;
                 instance->openError = result;
+            }
+
+            // The readers start here, on the JS thread, and Teardown sets `closing`
+            // before it dispatches anything — so for every connection there are
+            // exactly two outcomes: either its open was dispatched before the
+            // teardown, and its close is queued behind that open on its own
+            // dispatcher; or the teardown won and it is closed having never been
+            // opened.  Dispatched before the writer's own pending is cleared, so
+            // initialized() cannot settle in the gap between the writer finishing
+            // and the readers starting.
+            //
+            // Calls parked while the readers were idle settle the same three ways:
+            // the writer opens and they are dispatched behind the reader opens, as
+            // they would have been queued behind them before; the writer fails and
+            // they are failed with its error; or the teardown wins, and it has
+            // already failed them with a closed database.
+            if (order == 0)
+            {
+                if (!result.success)
+                {
+                    StampWriterFailureOnReaders(instance, result);
+                    instance->readersReady = true;
+                    FlushPendingReads(instance, PendingAction::Fail, result);
+                }
+                else if (!instance->closing)
+                {
+                    DispatchReaderOpens(instance);
+                    FlushPendingReads(instance, PendingAction::Dispatch, result);
+                }
             }
 
             if (--instance->openPending > 0)
@@ -327,6 +423,18 @@ namespace NSCSQLite
                 else *result = conn->unavailableError(); },
                                  [instance, result, order]()
                                  { NoteOpenFinished(instance, order, *result); });
+        }
+
+        // A reader that reaches a database the writer has not set up yet can read a
+        // file whose page size and journal mode are not settled, and its own
+        // presence blocks the writer's switch to WAL — so the readers open only
+        // once the writer's sequence has succeeded, and then all at once.
+        static void DispatchReaderOpens(DBInstance *instance)
+        {
+            instance->readersReady = true;
+            for (size_t i = 0; i < instance->readerDbs.size(); ++i)
+                DispatchOpen(instance, instance->readerDispatchers[i].get(), instance->readerDbs[i].get(),
+                             instance->readerOpts, static_cast<int>(i) + 1);
         }
 
         static void Open(const v8::FunctionCallbackInfo<v8::Value> &args)
@@ -364,20 +472,33 @@ namespace NSCSQLite
                 if (encKeyVal->IsString())
                     opts.encryptionKey = V8Helpers::FromV8String(isolate, encKeyVal);
 
-                auto onOpenVal = optionsObj->Get(ctx, V8Helpers::ToV8String(isolate, "onOpen")).ToLocalChecked();
-                if (onOpenVal->IsArray())
+                // Already resolved and validated by the JS layer, so this only reads
+                // it back. Every entry is kept, well-formed or not, because a failing
+                // step is reported by its index in this array.
+                auto sequenceVal = optionsObj->Get(ctx, V8Helpers::ToV8String(isolate, "openSequence")).ToLocalChecked();
+                if (sequenceVal->IsArray())
                 {
-                    auto onOpenArr = onOpenVal.As<v8::Array>();
-                    uint32_t len = onOpenArr->Length();
-                    opts.onOpen.reserve(len);
+                    auto sequenceArr = sequenceVal.As<v8::Array>();
+                    uint32_t len = sequenceArr->Length();
+                    opts.openSequence.reserve(len);
                     for (uint32_t i = 0; i < len; ++i)
                     {
-                        auto item = onOpenArr->Get(ctx, i).ToLocalChecked();
-                        if (!item->IsString())
-                            continue;
-                        std::string stmt = V8Helpers::FromV8String(isolate, item);
-                        if (!stmt.empty())
-                            opts.onOpen.push_back(std::move(stmt));
+                        OpenStep step;
+                        auto item = sequenceArr->Get(ctx, i).ToLocalChecked();
+                        if (item->IsObject())
+                        {
+                            auto stepObj = item.As<v8::Object>();
+                            auto kindVal = stepObj->Get(ctx, V8Helpers::ToV8String(isolate, "kind")).ToLocalChecked();
+                            if (kindVal->IsInt32())
+                                step.kind = static_cast<OpenStepKind>(static_cast<uint8_t>(kindVal->Int32Value(ctx).ToChecked()));
+                            auto scopeVal = stepObj->Get(ctx, V8Helpers::ToV8String(isolate, "scope")).ToLocalChecked();
+                            if (scopeVal->IsInt32())
+                                step.scope = static_cast<OpenStepScope>(static_cast<uint8_t>(scopeVal->Int32Value(ctx).ToChecked()));
+                            auto sqlVal = stepObj->Get(ctx, V8Helpers::ToV8String(isolate, "sql")).ToLocalChecked();
+                            if (sqlVal->IsString())
+                                step.sql = V8Helpers::FromV8String(isolate, sqlVal);
+                        }
+                        opts.openSequence.push_back(std::move(step));
                     }
                 }
 
@@ -400,15 +521,20 @@ namespace NSCSQLite
 
             OpenOptions writerOpts = opts;
             writerOpts.noMutex = true;
-            writerOpts.journalWAL = !opts.readOnly;
+            writerOpts.isWriter = true;
+
+            instance->readerOpts = opts;
+            instance->readerOpts.noMutex = true;
+            instance->readerOpts.isWriter = false;
+            instance->readerOpts.queryOnly = !opts.readOnly;
 
             instance->writerDb = std::make_unique<SQLiteConnection>();
             instance->writerDispatcher = std::make_unique<AndroidDispatcher>(1);
             instance->writerDispatcher->attachToRuntimeThread(isolate);
 
             // Opening the writer here is what lets a bad path, a wrong key or a
-            // failing onOpen throw out of the constructor.  asyncOpen trades that
-            // away for a constructor that never blocks.
+            // failing open step throw out of the constructor.  asyncOpen trades
+            // that away for a constructor that never blocks.
             if (!asyncOpen && !instance->writerDb->open(writerOpts))
             {
                 ThrowSQLiteError(isolate, instance->writerDb->lastError(), instance->writerDb->lastCode());
@@ -436,18 +562,13 @@ namespace NSCSQLite
 
             // Only now: an open task posts a completion that holds the instance,
             // so nothing may be dispatched while a failure above can still return
-            // and destroy it.
+            // and destroy it.  The writer is already open on the synchronous path,
+            // so the readers can go straight away; on the asynchronous one the
+            // writer's completion starts them.
             if (asyncOpen)
                 DispatchOpen(raw, raw->writerDispatcher.get(), raw->writerDb.get(), std::move(writerOpts), 0);
-
-            for (size_t i = 0; i < raw->readerDbs.size(); ++i)
-            {
-                OpenOptions readerOpts = opts;
-                readerOpts.noMutex = true;
-                readerOpts.queryOnly = !opts.readOnly;
-                DispatchOpen(raw, raw->readerDispatchers[i].get(), raw->readerDbs[i].get(),
-                             std::move(readerOpts), static_cast<int>(i) + 1);
-            }
+            else
+                DispatchReaderOpens(raw);
         }
 
         // Resolves once every connection is open; rejects with the first open
@@ -497,19 +618,19 @@ namespace NSCSQLite
         // Capturing `instance` raw is safe: Close() frees it only from the last
         // completion, which is queued behind everything dispatched before it.
         template <typename F1, typename F2>
-        static void Dispatch(AndroidDispatcher &dispatcher, SQLiteConnection *db, DBInstance *instance,
-                             v8::Isolate *isolate, v8::Local<v8::Promise::Resolver> resolver,
-                             F1 work, F2 completion)
+        static void DispatchResolved(AndroidDispatcher &dispatcher, SQLiteConnection *db, DBInstance *instance,
+                                     v8::Persistent<v8::Promise::Resolver> *persistentResolver,
+                                     F1 work, F2 completion)
         {
-            auto *persistentResolver = new v8::Persistent<v8::Promise::Resolver>(isolate, resolver);
             auto resultPtr = std::make_shared<QueryResult>();
 
             dispatcher.dispatch(
                 [db, work = std::move(work), resultPtr]() mutable
                 {
-                    // Queued behind this connection's open task, so one that is
-                    // still not open here is one whose open failed.  A reader
-                    // never falls back to another connection.
+                    // Queued behind this connection's open, so one that is still
+                    // not open here either failed to open or never opened because
+                    // the writer failed.  A reader never falls back to another
+                    // connection.
                     *resultPtr = db->isOpen() ? work() : db->unavailableError();
                 },
                 [instance, persistentResolver, completion = std::move(completion), resultPtr]()
@@ -525,6 +646,16 @@ namespace NSCSQLite
                 });
         }
 
+        template <typename F1, typename F2>
+        static void Dispatch(AndroidDispatcher &dispatcher, SQLiteConnection *db, DBInstance *instance,
+                             v8::Isolate *isolate, v8::Local<v8::Promise::Resolver> resolver,
+                             F1 work, F2 completion)
+        {
+            DispatchResolved(dispatcher, db, instance,
+                             new v8::Persistent<v8::Promise::Resolver>(isolate, resolver),
+                             std::move(work), std::move(completion));
+        }
+
         // Round-robin reader selection; serialized mode has no pool and reads on
         // the writer.
         static std::pair<AndroidDispatcher *, SQLiteConnection *> NextReader(DBInstance *instance)
@@ -534,6 +665,46 @@ namespace NSCSQLite
                 return {instance->writerDispatcher.get(), instance->writerDb.get()};
             int idx = instance->readerIndex.fetch_add(1, std::memory_order_relaxed) % n;
             return {instance->readerDispatchers[idx].get(), instance->readerDbs[idx].get()};
+        }
+
+        // Dispatch onto a reader, or park the call when the readers have not been
+        // started yet — awaiting initialized() is optional, so a read issued as soon
+        // as the database is constructed has to wait for the writer rather than be
+        // turned away by a connection that is not open.  The reader is already
+        // chosen either way, so the round robin is unaffected.
+        template <typename F1, typename F2>
+        static void DispatchRead(DBInstance *instance, AndroidDispatcher &dispatcher, SQLiteConnection *rdb,
+                                 v8::Isolate *isolate, v8::Local<v8::Promise::Resolver> resolver,
+                                 F1 work, F2 completion)
+        {
+            // Serialized mode reads on the writer, which already queues behind its
+            // own open.
+            if (instance->readersReady || instance->readerDbs.empty())
+            {
+                Dispatch(dispatcher, rdb, instance, isolate, resolver, std::move(work), std::move(completion));
+                return;
+            }
+
+            auto *persistentResolver = new v8::Persistent<v8::Promise::Resolver>(isolate, resolver);
+            instance->pendingReads.push_back(
+                [instance, dispatcher = &dispatcher, rdb, persistentResolver,
+                 work = std::move(work), completion = std::move(completion)](PendingAction action, const QueryResult &error) mutable
+                {
+                    switch (action)
+                    {
+                    case PendingAction::Dispatch:
+                        DispatchResolved(*dispatcher, rdb, instance, persistentResolver,
+                                         std::move(work), std::move(completion));
+                        break;
+                    case PendingAction::Fail:
+                        instance->adapter->reject(persistentResolver, error.error, error.errorCode);
+                        break;
+                    case PendingAction::Drop:
+                        persistentResolver->Reset();
+                        delete persistentResolver;
+                        break;
+                    }
+                });
         }
 
         // Runs fn on the writer connection from the JS thread: inline when the
@@ -582,11 +753,10 @@ namespace NSCSQLite
             ParamList params = ParseParams(isolate, args[1]);
 
             auto reader = NextReader(instance);
-            AndroidDispatcher *dispatcher = reader.first;
             SQLiteConnection *rdb = reader.second;
-            Dispatch(*dispatcher, rdb, instance, isolate, resolver, [rdb, sql, params = std::move(params)]() -> QueryResult
-                     { return rdb->executeJson(sql, params); }, [](DBInstance *inst, void *ctx, const QueryResult &res)
-                     { inst->adapter->resolveWithRows(ctx, res); });
+            DispatchRead(instance, *reader.first, rdb, isolate, resolver, [rdb, sql, params = std::move(params)]() -> QueryResult
+                         { return rdb->executeJson(sql, params); }, [](DBInstance *inst, void *ctx, const QueryResult &res)
+                         { inst->adapter->resolveWithRows(ctx, res); });
         }
 
         static void AsyncSelectArray(const v8::FunctionCallbackInfo<v8::Value> &args)
@@ -603,11 +773,10 @@ namespace NSCSQLite
             ParamList params = ParseParams(isolate, args[1]);
 
             auto reader = NextReader(instance);
-            AndroidDispatcher *dispatcher = reader.first;
             SQLiteConnection *rdb = reader.second;
-            Dispatch(*dispatcher, rdb, instance, isolate, resolver, [rdb, sql, params = std::move(params)]() -> QueryResult
-                     { return rdb->executeArrayJson(sql, params); }, [](DBInstance *inst, void *ctx, const QueryResult &res)
-                     { inst->adapter->resolveWithArrayResult(ctx, res); });
+            DispatchRead(instance, *reader.first, rdb, isolate, resolver, [rdb, sql, params = std::move(params)]() -> QueryResult
+                         { return rdb->executeArrayJson(sql, params); }, [](DBInstance *inst, void *ctx, const QueryResult &res)
+                         { inst->adapter->resolveWithArrayResult(ctx, res); });
         }
 
         static void AsyncGet(const v8::FunctionCallbackInfo<v8::Value> &args)
@@ -624,11 +793,10 @@ namespace NSCSQLite
             ParamList params = ParseParams(isolate, args[1]);
 
             auto reader = NextReader(instance);
-            AndroidDispatcher *dispatcher = reader.first;
             SQLiteConnection *rdb = reader.second;
-            Dispatch(*dispatcher, rdb, instance, isolate, resolver, [rdb, sql, params = std::move(params)]() -> QueryResult
-                     { return rdb->executeGetJson(sql, params); }, [](DBInstance *inst, void *ctx, const QueryResult &res)
-                     { inst->adapter->resolveWithFirstRow(ctx, res); });
+            DispatchRead(instance, *reader.first, rdb, isolate, resolver, [rdb, sql, params = std::move(params)]() -> QueryResult
+                         { return rdb->executeGetJson(sql, params); }, [](DBInstance *inst, void *ctx, const QueryResult &res)
+                         { inst->adapter->resolveWithFirstRow(ctx, res); });
         }
 
         static void AsyncGetArray(const v8::FunctionCallbackInfo<v8::Value> &args)
@@ -645,11 +813,10 @@ namespace NSCSQLite
             ParamList params = ParseParams(isolate, args[1]);
 
             auto reader = NextReader(instance);
-            AndroidDispatcher *dispatcher = reader.first;
             SQLiteConnection *rdb = reader.second;
-            Dispatch(*dispatcher, rdb, instance, isolate, resolver, [rdb, sql, params = std::move(params)]() -> QueryResult
-                     { return rdb->executeGetArrayJson(sql, params); }, [](DBInstance *inst, void *ctx, const QueryResult &res)
-                     { inst->adapter->resolveWithFirstArrayRow(ctx, res); });
+            DispatchRead(instance, *reader.first, rdb, isolate, resolver, [rdb, sql, params = std::move(params)]() -> QueryResult
+                         { return rdb->executeGetArrayJson(sql, params); }, [](DBInstance *inst, void *ctx, const QueryResult &res)
+                         { inst->adapter->resolveWithFirstArrayRow(ctx, res); });
         }
 
         //  Sync Methods

@@ -5,17 +5,24 @@
 /**
  * Every connection is opened by the queue that owns it, so key derivation never
  * runs on the calling thread. The writer is the exception unless `asyncOpen` is
- * YES: it is opened here, so a bad path, a wrong key or a failing `onOpen`
+ * YES: it is opened here, so a bad path, a wrong key or a failing open step
  * returns nil with `error` set. With `asyncOpen` the open always succeeds here
  * and the failure arrives through `initializedWithCompletion:` and through every
- * operation instead.
+ * operation instead. Readers start only once the writer has opened; if it fails
+ * they take on its failure without touching the file.
+ *
+ * `openSequence` is each connection's setup in order, already resolved and
+ * validated by the JavaScript layer, so it is run as given. Every element carries
+ * `kind` (0 run `sql`, 1 apply `encryptionKey`, 2 switch to WAL) and `scope`
+ * (0 every connection, 1 the writer, 2 the readers). In serialized mode the
+ * single connection is the writer.
  */
 + (instancetype)openWithPath:(NSString *)path
                     poolSize:(int)poolSize
                     readOnly:(BOOL)readOnly
                  busyTimeout:(int)busyTimeoutMs
                encryptionKey:(NSString *)encryptionKey
-                      onOpen:(NSArray<NSString *> *)onOpen
+                openSequence:(NSArray<NSDictionary<NSString *, id> *> *)openSequence
                   serialized:(BOOL)serialized
                    asyncOpen:(BOOL)asyncOpen
                        error:(NSError **)error;

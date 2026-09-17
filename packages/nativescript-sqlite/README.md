@@ -96,7 +96,8 @@ const db = openDatabase({
 | `serialized` | `boolean` | auto | Use a single serialized connection instead of the reader pool. Defaults to `true` for in-memory databases, `false` otherwise |
 | `encryptionKey` | `string` | — | Applied to every connection via `PRAGMA key`. Requires an engine with a codec — see [Encryption Caveats](#encryption-caveats) |
 | `encryptionKeyFormat` | `'passphrase' \| 'raw'` | `'passphrase'` | How `encryptionKey` is interpreted. See [Passphrase vs raw key](#passphrase-vs-raw-key) |
-| `onOpen` | `string[]` | `[]` | SQL run on every connection right after `PRAGMA key`, before anything else. A statement that fails aborts the open |
+| `onOpen` | `string[]` | `[]` | SQL run on every connection right after `PRAGMA key` and before WAL. A statement that fails aborts the open. Sugar for `openSequence: [OpenStep.key, ...onOpen, OpenStep.wal]` — see [Controlling the open sequence](#controlling-the-open-sequence) |
+| `openSequence` | `OpenStep[]` | — | The full order in which a connection is set up, replacing `[OpenStep.key, ...onOpen, OpenStep.wal]`. Cannot be combined with `onOpen`. See [Controlling the open sequence](#controlling-the-open-sequence) |
 | `asyncOpen` | `boolean` | `false` | Open the writer on a background thread as well, so `openDatabase()` neither blocks nor throws. See [Opening off the JavaScript thread](#opening-off-the-javascript-thread) |
 
 > **In-memory databases:** passing `":memory:"` (or an empty path) defaults to **serialized mode** — a single connection handles all reads, writes, transactions, and sync calls. This is required because a pool of separate connections cannot share a private in-memory database. In serialized mode at most one transaction is active at a time and reads never run concurrently with writes. Each `openDatabase(":memory:")` call gets its own isolated database.
@@ -109,13 +110,146 @@ const db = openDatabase({
 >
 > Prefer `memdb` over the older `?mode=memory&cache=shared` (shared-cache) form: shared cache uses table-level locking and returns `SQLITE_LOCKED` on contention, which `busyTimeout` does **not** retry; `memdb` returns a retryable `SQLITE_BUSY` instead. The shared in-memory database lives only while at least one connection is open (the pool keeps it alive), and is destroyed once the database is closed. The URI name must begin with `/`.
 
+#### Controlling the open sequence
+
+Every connection — the writer and each reader — is set up by running one list of steps before it serves anything:
+
+```typescript
+[OpenStep.key, ...onOpen, OpenStep.wal]
+```
+
+`OpenStep.key` applies `encryptionKey` to the connection (a no-op when no key is set). `OpenStep.wal` switches the journal mode to WAL (a no-op on a reader, and on a read-only database). `onOpen` is the SQL in between and nothing more — it is sugar for exactly this list.
+
+Readers additionally receive `PRAGMA query_only=ON` **after** the whole sequence. That statement is not part of the sequence and cannot be moved.
+
+`openSequence` replaces the list, so you state the whole order yourself:
+
+```typescript
+import { openDatabase, OpenStep } from '@edusperoni/nativescript-sqlite';
+
+const db = openDatabase({
+  path: dbPath,
+  encryptionKey: key,
+  openSequence: [OpenStep.key, 'PRAGMA foreign_keys = ON', OpenStep.wal],
+});
+```
+
+That is the default sequence written out: `onOpen: ['PRAGMA foreign_keys = ON']` produces the same steps.
+
+**The order is not free-form.** These constraints are SQLite's, not the plugin's:
+
+| constraint | what it means for the sequence |
+|---|---|
+| The key must precede anything that reads the database file | `OpenStep.key` goes first, unless a step genuinely has to run before the key is applied |
+| Switching the journal mode reads the file | `OpenStep.wal` can never precede `OpenStep.key` |
+| `page_size` and `auto_vacuum` only take effect on a new file | They must come before `OpenStep.wal`, and belong on the writer |
+| Nothing needs to come after WAL | `OpenStep.wal` is normally the last step |
+
+**Which option to reach for.** Use `onOpen` for "run this on every connection, in the normal place" — which is most cases: `PRAGMA foreign_keys = ON`, an [engine assertion](#the-engine-specific-assertion), anything that only needs a decrypted database and to precede every query. Use `openSequence` when you need a statement somewhere *else* in that order, or on only *some* of the connections. The two cannot be combined; `openSequence` has to express the whole order, including the markers.
+
+**The slots an `openSequence` gives you:**
+
+*Before the key.* A step here runs before the connection has been keyed, so it cannot read the database. That leaves settings the engine needs in order to apply the key at all — selecting a cipher on an engine whose cipher is chosen by pragma:
+
+```typescript
+const db = openDatabase({
+  path: dbPath,
+  encryptionKey: key,
+  openSequence: ["PRAGMA cipher = 'chacha20'", OpenStep.key, OpenStep.wal],
+});
+```
+
+Be strict about what goes here. On an *existing* encrypted database a step before the key can only be one that touches no page at all — even `PRAGMA cache_size` fails with `SQLITE_NOTADB`, because reading the header is already reading the database. A statement that appears to work against a brand-new file will fail the next time the app starts.
+
+*After the key.* Codec settings, and anything that has to read the database. This is the slot `onOpen` fills.
+
+*Writer-only, before WAL.* Settings that only take effect while the file is new:
+
+```typescript
+const db = openDatabase({
+  path: dbPath,
+  openSequence: [
+    OpenStep.key,
+    { sql: 'PRAGMA page_size = 8192', on: 'writer' },
+    { sql: 'PRAGMA auto_vacuum = INCREMENTAL', on: 'writer' },
+    OpenStep.wal,
+  ],
+});
+```
+
+*Every connection.* Per-connection state such as `PRAGMA synchronous` or `PRAGMA cache_size`, anywhere after the key.
+
+**Scoping a step.** A step is either a bare SQL string or a `{ sql, on }` pair:
+
+| `on` | runs on |
+|---|---|
+| `'all'` (default) | the writer and every reader |
+| `'writer'` | the writer connection only |
+| `'readers'` | the reader connections only |
+
+A bare string is `{ sql, on: 'all' }`. In **serialized mode the single connection is the writer**, so `'readers'` steps never run there. `OpenStep.key` always applies to every connection; `OpenStep.wal` is always the writer's.
+
+```typescript
+const db = openDatabase({
+  path: dbPath,
+  openSequence: [
+    OpenStep.key,
+    { sql: 'PRAGMA cache_size = -4096', on: 'writer' },
+    { sql: 'PRAGMA cache_size = -1024', on: 'readers' },
+    OpenStep.wal,
+  ],
+});
+```
+
+**Opting out of WAL.** Leaving the `wal` marker out of an `openSequence` leaves the journal mode untouched — a new file keeps its rollback journal.
+
+That has a price. WAL is what lets readers proceed without blocking the writer; without it the readers and the writer contend for the same file, so a reader pool buys you very little. Prefer a single connection in that case:
+
+```typescript
+const db = openDatabase({
+  path: dbPath,
+  openSequence: [OpenStep.key],
+  serialized: true,
+});
+```
+
+**Do not hand-write `PRAGMA key` as an `openSequence` step.** The key is a marker rather than a string for three reasons:
+
+- **The plugin quotes it for you.** The key is rendered as a quoted SQL literal with any embedded quote doubled, so a key containing one can neither break the statement nor inject into it. A hand-written pragma has to get that right itself.
+- **`encryptionKeyFormat` decides how the key is read.** It is what distinguishes a passphrase from raw key material — see [Passphrase vs raw key](#passphrase-vs-raw-key). A hand-written pragma bypasses that decision and can silently produce a different key from the same characters.
+- **It puts the key inside a statement,** where it is one logged or reported statement away from somewhere you did not intend.
+
+#### What an open sequence is refused for
+
+Everything below is a programming error rather than an open failure, so `openDatabase()` reports it **synchronously, before anything is opened** — including under [`asyncOpen`](#opening-off-the-javascript-thread), where nothing else does. Each is a `SQLiteError` with code `SQLITE_MISUSE` (21).
+
+| message | cause |
+|---|---|
+| `onOpen and openSequence cannot be combined; onOpen is [OpenStep.key, ...onOpen, OpenStep.wal], so express the whole order in openSequence` | both options passed |
+| `openSequence[<i>]: expected SQL, { sql, on }, OpenStep.key or OpenStep.wal` | an entry that is none of those |
+| `openSequence[<i>]: 'on' must be 'all', 'writer' or 'readers'` | an unknown scope |
+| `openSequence: OpenStep.key appears more than once` | a repeated `key` marker |
+| `openSequence: OpenStep.wal appears more than once` | a repeated `wal` marker |
+| `openSequence has no OpenStep.key but encryptionKey is set; without it the database would be written unencrypted` | an `encryptionKey` with no `key` marker |
+| `openSequence puts OpenStep.wal before OpenStep.key; switching the journal mode reads the database, which cannot happen before the key is applied` | `wal` ahead of `key`, with a key set |
+
+The last two only apply when an `encryptionKey` is actually set. The `encryptionKey`-without-a-marker case is worth dwelling on: it exists so that a forgotten marker cannot quietly hand you an unencrypted database, which is the same failure mode [Encryption Caveats](#encryption-caveats) is about.
+
+**At open time**, a step whose SQL fails aborts the open and reports:
+
+> open step `<index>` failed: `<sqlite message>`
+
+carrying the SQLite result code from the statement that failed. The index is into the **effective** sequence — the one the connection actually ran, so in the default sequence `OpenStep.key` is step 0 and the first `onOpen` statement is step 1. Empty SQL strings are dropped and do not occupy an index.
+
+Your statement is deliberately **not** quoted back, and neither is the key: the index says which step failed without putting the SQL you wrote — or your key — into an error string that may end up in a log. SQLite's own message is passed through unchanged, so it can still name an object it could not resolve (`no such table: audit`), which is the half worth having. The key step is the exception: if SQLite's message ever contained the key, the message is replaced instead of passed through.
+
 #### Opening off the JavaScript thread
 
 Opening a connection is not always cheap. With an `encryptionKey` it costs a PBKDF2 derivation — [around 90 ms each](#the-cost-of-a-passphrase), once per connection — so where those opens run matters.
 
 - **Reader connections are always opened by their own threads.** Their key derivation never runs on the JavaScript thread; it surfaces as latency on the first read routed to each reader.
 - **The writer is opened synchronously inside `openDatabase()`** by default, so a bad path, a wrong key or a failing `onOpen` statement still throws from `openDatabase()` itself, where you would look for it.
-- **`asyncOpen: true` opens the writer on a background thread too.** `openDatabase()` then returns immediately and **never throws for an open failure** — there is nothing left in it that can fail.
+- **`asyncOpen: true` opens the writer on a background thread too.** `openDatabase()` then returns immediately and **never throws for an open failure** — there is nothing left in it that can fail. It still throws for [a sequence that cannot work](#what-an-open-sequence-is-refused-for), which is checked before anything is opened.
 
 `initialized()` resolves once every connection is open, and rejects with the error that failed the open:
 
@@ -505,7 +639,7 @@ The plugin opens `1 + poolSize` SQLite connections to the same database file:
 
 There is no separate connection behind the `*Sync` methods; they share the writer, which is what gives them their ordering guarantees — see [Sync Methods](#sync-methods).
 
-WAL (Write-Ahead Logging) mode is enabled automatically on the writer. WAL allows readers to proceed without blocking writes, and writes to proceed without blocking readers.
+WAL (Write-Ahead Logging) mode is enabled automatically on the writer, as the last step of [the open sequence](#controlling-the-open-sequence). WAL allows readers to proceed without blocking writes, and writes to proceed without blocking readers.
 
 The queue descriptions above are iOS terminology. Android has the same structure — one writer, `poolSize` readers, a transaction queue — built on a native thread pool instead of GCD. Both platforms open each reader on the thread that serves it, and open the writer inside `openDatabase()` unless [`asyncOpen`](#opening-off-the-javascript-thread) moves it off too. With an `encryptionKey` that matters, because every connection is keyed — see [The cost of a passphrase](#the-cost-of-a-passphrase).
 
@@ -997,6 +1131,22 @@ interface SQLiteArrayResult<T extends SQLiteValue[] = SQLiteValue[]> {
   rows: T[];
 }
 
+// Which connections a step of the open sequence runs on.
+type OpenStepScope = 'all' | 'writer' | 'readers';
+
+// One step: SQL, scoped SQL, or one of the two markers.
+type OpenStep =
+  | string
+  | { sql: string; on?: OpenStepScope }
+  | { readonly step: 'key' }
+  | { readonly step: 'wal' };
+
+// The two markers themselves.
+declare const OpenStep: {
+  readonly key: { readonly step: 'key' };
+  readonly wal: { readonly step: 'wal' };
+};
+
 interface DatabaseOptions {
   path: string;
   readOnly?: boolean;
@@ -1005,6 +1155,7 @@ interface DatabaseOptions {
   encryptionKey?: string;
   encryptionKeyFormat?: 'passphrase' | 'raw';
   onOpen?: string[];
+  openSequence?: OpenStep[];
   serialized?: boolean;
   asyncOpen?: boolean;
 }

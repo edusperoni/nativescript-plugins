@@ -6,6 +6,7 @@
 
 #include <node_api.h>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -45,6 +46,20 @@ namespace NSCSQLite
             "a transaction is active on this database; use the transaction object's "
             "executeSync, or pass { joinTransaction: true } to run inside it";
 
+        // What becomes of a call parked before the readers were ready.  Drop is the
+        // teardown that cannot settle anything — the finalizer path, where the JS
+        // object is already unreachable.
+        enum class PendingAction
+        {
+            Dispatch,
+            Fail,
+            Drop
+        };
+
+        // A parked call, carrying its own deferred.  The QueryResult is read for
+        // Fail and ignored otherwise.
+        using PendingRead = std::function<void(PendingAction, const QueryResult &)>;
+
         // Every connection is SQLITE_OPEN_NOMUTEX: each one belongs to a dispatcher,
         // and that dispatcher is what serializes the worker thread and the env's
         // thread against each other.  WAL mode (set on the writer) lets readers
@@ -60,6 +75,20 @@ namespace NSCSQLite
             std::vector<std::unique_ptr<SQLiteConnection>> readerDbs;
             std::vector<std::unique_ptr<NapiDispatcher>> readerDispatchers;
             std::atomic<int> readerIndex{0};
+
+            // The readers' options, kept because their opens are dispatched only
+            // once the writer's has succeeded.
+            OpenOptions readerOpts{};
+            // Set by Teardown: no reader open may be dispatched after it. Both it
+            // and the completion that reads it run on the env's thread, so the two
+            // cannot interleave.
+            bool closing{false};
+            // True once the reader opens have been dispatched. Until then a reader
+            // dispatcher is idle, so a call routed to one is parked rather than run
+            // against a connection that is not open yet. Env thread only, like
+            // everything else in this block, so neither needs a lock.
+            bool readersReady{false};
+            std::vector<PendingRead> pendingReads;
 
             EnvState *state{nullptr};
 
@@ -103,6 +132,17 @@ namespace NSCSQLite
             return res;
         }
 
+        // Settles the calls parked before the readers were ready: dispatching them
+        // now that a reader can take them, or failing them with the error that
+        // stopped the readers opening.
+        static void FlushPendingReads(DBInstance *instance, PendingAction action, const QueryResult &error)
+        {
+            auto parked = std::move(instance->pendingReads);
+            instance->pendingReads.clear();
+            for (auto &item : parked)
+                item(action, error);
+        }
+
         // Closes every connection on its own dispatcher and frees the instance
         // once all of them are done.  deferred is null on the finalizer path.
         // Each dispatcher is a single FIFO thread whose completions drain in
@@ -118,6 +158,19 @@ namespace NSCSQLite
         static void Teardown(DBInstance *instance, napi_deferred deferred)
         {
             instance->state->live.erase(instance);
+            instance->closing = true;
+
+            // Parked work has to settle before the instance can be freed.  A null
+            // deferred is the finalizer path, where nothing can be awaiting these
+            // anyway: they are dropped with the instance instead.
+            if (deferred)
+            {
+                QueryResult closed;
+                closed.success = false;
+                closed.error = "database is closed";
+                closed.errorCode = SQLITE_MISUSE;
+                FlushPendingReads(instance, PendingAction::Fail, closed);
+            }
 
             // A span left open — close() called from inside a transactionSync
             // callback — would keep the writer claimed, so the close below could
@@ -397,6 +450,17 @@ namespace NSCSQLite
             instance->state->adapter.reject(deferred, instance->openError.error, instance->openError.errorCode);
         }
 
+        static void DispatchReaderOpens(DBInstance *instance);
+
+        // A reader the pool never started must not answer with "database is
+        // closed": every method on a failed-open database reports the same error,
+        // whichever connection it would have been routed to.
+        static void StampWriterFailureOnReaders(DBInstance *instance, const QueryResult &error)
+        {
+            for (auto &reader : instance->readerDbs)
+                reader->recordOpenFailure(error);
+        }
+
         // Runs on the env's thread, from an open task's completion. `order` is the
         // connection's place in writer-then-reader order, so that the failure
         // reported is the first one regardless of which open finishes first.
@@ -406,6 +470,35 @@ namespace NSCSQLite
             {
                 instance->openFailedOrder = order;
                 instance->openError = result;
+            }
+
+            // The readers start here, on the env's thread, and Teardown sets
+            // `closing` before it dispatches anything — so for every connection
+            // there are exactly two outcomes: either its open was dispatched before
+            // the teardown, and its close is queued behind that open on its own
+            // dispatcher; or the teardown won and it is closed having never been
+            // opened.  Dispatched before the writer's own pending is cleared, so
+            // initialized() cannot settle in the gap between the writer finishing
+            // and the readers starting.
+            //
+            // Calls parked while the readers were idle settle the same three ways:
+            // the writer opens and they are dispatched behind the reader opens, as
+            // they would have been queued behind them before; the writer fails and
+            // they are failed with its error; or the teardown wins, and it has
+            // already failed them with a closed database.
+            if (order == 0)
+            {
+                if (!result.success)
+                {
+                    StampWriterFailureOnReaders(instance, result);
+                    instance->readersReady = true;
+                    FlushPendingReads(instance, PendingAction::Fail, result);
+                }
+                else if (!instance->closing)
+                {
+                    DispatchReaderOpens(instance);
+                    FlushPendingReads(instance, PendingAction::Dispatch, result);
+                }
             }
 
             if (--instance->openPending > 0)
@@ -430,6 +523,18 @@ namespace NSCSQLite
                 else *result = conn->unavailableError(); },
                                  [instance, result, order]()
                                  { NoteOpenFinished(instance, order, *result); });
+        }
+
+        // A reader that reaches a database the writer has not set up yet can read a
+        // file whose page size and journal mode are not settled, and its own
+        // presence blocks the writer's switch to WAL — so the readers open only
+        // once the writer's sequence has succeeded, and then all at once.
+        static void DispatchReaderOpens(DBInstance *instance)
+        {
+            instance->readersReady = true;
+            for (size_t i = 0; i < instance->readerDbs.size(); ++i)
+                DispatchOpen(instance, instance->readerDispatchers[i].get(), instance->readerDbs[i].get(),
+                             instance->readerOpts, static_cast<int>(i) + 1);
         }
 
         static napi_value Construct(napi_env env, napi_callback_info info)
@@ -491,24 +596,41 @@ namespace NSCSQLite
                     NapiHelpers::ToStdString(env, value, opts.encryptionKey);
                 }
 
+                // Already resolved and validated by the JS layer, so this only reads
+                // it back. Every entry is kept, well-formed or not, because a failing
+                // step is reported by its index in this array.
                 bool isArray = false;
-                if (napi_get_named_property(env, options, "onOpen", &value) == napi_ok &&
+                if (napi_get_named_property(env, options, "openSequence", &value) == napi_ok &&
                     napi_is_array(env, value, &isArray) == napi_ok && isArray)
                 {
                     uint32_t length = 0;
                     napi_get_array_length(env, value, &length);
-                    opts.onOpen.reserve(length);
+                    opts.openSequence.reserve(length);
                     for (uint32_t i = 0; i < length; ++i)
                     {
+                        OpenStep step;
                         napi_value item = nullptr;
-                        if (napi_get_element(env, value, i, &item) != napi_ok)
-                            continue;
-                        if (napi_typeof(env, item, &valueType) != napi_ok || valueType != napi_string)
-                            continue;
-                        std::string stmt;
-                        NapiHelpers::ToStdString(env, item, stmt);
-                        if (!stmt.empty())
-                            opts.onOpen.push_back(std::move(stmt));
+                        if (napi_get_element(env, value, i, &item) == napi_ok &&
+                            napi_typeof(env, item, &valueType) == napi_ok && valueType == napi_object)
+                        {
+                            napi_value field = nullptr;
+                            if (napi_get_named_property(env, item, "kind", &field) == napi_ok &&
+                                NapiHelpers::IsInt32(env, field, &asInt))
+                            {
+                                step.kind = static_cast<OpenStepKind>(static_cast<uint8_t>(asInt));
+                            }
+                            if (napi_get_named_property(env, item, "scope", &field) == napi_ok &&
+                                NapiHelpers::IsInt32(env, field, &asInt))
+                            {
+                                step.scope = static_cast<OpenStepScope>(static_cast<uint8_t>(asInt));
+                            }
+                            if (napi_get_named_property(env, item, "sql", &field) == napi_ok &&
+                                napi_typeof(env, field, &valueType) == napi_ok && valueType == napi_string)
+                            {
+                                NapiHelpers::ToStdString(env, field, step.sql);
+                            }
+                        }
+                        opts.openSequence.push_back(std::move(step));
                     }
                 }
 
@@ -534,14 +656,19 @@ namespace NSCSQLite
 
             OpenOptions writerOpts = opts;
             writerOpts.noMutex = true;
-            writerOpts.journalWAL = !opts.readOnly;
+            writerOpts.isWriter = true;
+
+            instance->readerOpts = opts;
+            instance->readerOpts.noMutex = true;
+            instance->readerOpts.isWriter = false;
+            instance->readerOpts.queryOnly = !opts.readOnly;
 
             instance->writerDb = std::make_unique<SQLiteConnection>();
             instance->writerDispatcher = std::make_unique<NapiDispatcher>(state->completions, 1);
 
             // Opening the writer here is what lets a bad path, a wrong key or a
-            // failing onOpen throw out of the constructor.  asyncOpen trades that
-            // away for a constructor that never blocks.
+            // failing open step throw out of the constructor.  asyncOpen trades
+            // that away for a constructor that never blocks.
             if (!asyncOpen && !instance->writerDb->open(writerOpts))
             {
                 ThrowSQLiteError(env, instance->writerDb->lastError(), instance->writerDb->lastCode());
@@ -572,18 +699,13 @@ namespace NSCSQLite
 
             // Only now: an open task posts a completion that holds the instance,
             // so nothing may be dispatched while a failure above can still return
-            // and destroy it.
+            // and destroy it.  The writer is already open on the synchronous path,
+            // so the readers can go straight away; on the asynchronous one the
+            // writer's completion starts them.
             if (asyncOpen)
                 DispatchOpen(raw, raw->writerDispatcher.get(), raw->writerDb.get(), std::move(writerOpts), 0);
-
-            for (size_t i = 0; i < raw->readerDbs.size(); ++i)
-            {
-                OpenOptions readerOpts = opts;
-                readerOpts.noMutex = true;
-                readerOpts.queryOnly = !opts.readOnly;
-                DispatchOpen(raw, raw->readerDispatchers[i].get(), raw->readerDbs[i].get(),
-                             std::move(readerOpts), static_cast<int>(i) + 1);
-            }
+            else
+                DispatchReaderOpens(raw);
 
             return call.self;
         }
@@ -647,22 +769,18 @@ namespace NSCSQLite
         // Capturing `instance` raw is safe: Close() frees it only from the last
         // completion, which is queued behind everything dispatched before it.
         template <typename F1, typename F2>
-        static napi_value Dispatch(NapiDispatcher &dispatcher, SQLiteConnection *db, DBInstance *instance,
-                                   napi_env env, F1 work, F2 completion)
+        static void DispatchDeferred(NapiDispatcher &dispatcher, SQLiteConnection *db, DBInstance *instance,
+                                     napi_deferred deferred, F1 work, F2 completion)
         {
-            napi_deferred deferred = nullptr;
-            napi_value promise = nullptr;
-            if (napi_create_promise(env, &deferred, &promise) != napi_ok)
-                return nullptr;
-
             auto resultPtr = std::make_shared<QueryResult>();
 
             dispatcher.dispatch(
                 [db, work = std::move(work), resultPtr]() mutable
                 {
-                    // Queued behind this connection's open task, so one that is
-                    // still not open here is one whose open failed.  A reader
-                    // never falls back to another connection.
+                    // Queued behind this connection's open, so one that is still
+                    // not open here either failed to open or never opened because
+                    // the writer failed.  A reader never falls back to another
+                    // connection.
                     *resultPtr = db->isOpen() ? work() : db->unavailableError();
                 },
                 [instance, deferred, completion = std::move(completion), resultPtr]()
@@ -676,7 +794,18 @@ namespace NSCSQLite
                         instance->state->adapter.reject(deferred, resultPtr->error, resultPtr->errorCode);
                     }
                 });
+        }
 
+        template <typename F1, typename F2>
+        static napi_value Dispatch(NapiDispatcher &dispatcher, SQLiteConnection *db, DBInstance *instance,
+                                   napi_env env, F1 work, F2 completion)
+        {
+            napi_deferred deferred = nullptr;
+            napi_value promise = nullptr;
+            if (napi_create_promise(env, &deferred, &promise) != napi_ok)
+                return nullptr;
+
+            DispatchDeferred(dispatcher, db, instance, deferred, std::move(work), std::move(completion));
             return promise;
         }
 
@@ -689,6 +818,45 @@ namespace NSCSQLite
                 return {instance->writerDispatcher.get(), instance->writerDb.get()};
             int idx = instance->readerIndex.fetch_add(1, std::memory_order_relaxed) % n;
             return {instance->readerDispatchers[idx].get(), instance->readerDbs[idx].get()};
+        }
+
+        // Dispatch onto a reader, or park the call when the readers have not been
+        // started yet — awaiting initialized() is optional, so a read issued as soon
+        // as the database is constructed has to wait for the writer rather than be
+        // turned away by a connection that is not open.  The reader is already
+        // chosen either way, so the round robin is unaffected.
+        template <typename F1, typename F2>
+        static napi_value DispatchRead(DBInstance *instance, NapiDispatcher &dispatcher, SQLiteConnection *rdb,
+                                       napi_env env, F1 work, F2 completion)
+        {
+            // Serialized mode reads on the writer, which already queues behind its
+            // own open.
+            if (instance->readersReady || instance->readerDbs.empty())
+                return Dispatch(dispatcher, rdb, instance, env, std::move(work), std::move(completion));
+
+            napi_deferred deferred = nullptr;
+            napi_value promise = nullptr;
+            if (napi_create_promise(env, &deferred, &promise) != napi_ok)
+                return nullptr;
+
+            instance->pendingReads.push_back(
+                [instance, dispatcher = &dispatcher, rdb, deferred,
+                 work = std::move(work), completion = std::move(completion)](PendingAction action, const QueryResult &error) mutable
+                {
+                    switch (action)
+                    {
+                    case PendingAction::Dispatch:
+                        DispatchDeferred(*dispatcher, rdb, instance, deferred,
+                                         std::move(work), std::move(completion));
+                        break;
+                    case PendingAction::Fail:
+                        instance->state->adapter.reject(deferred, error.error, error.errorCode);
+                        break;
+                    case PendingAction::Drop:
+                        break;
+                    }
+                });
+            return promise;
         }
 
         // Runs fn on the writer connection from the env's thread: inline when the
@@ -740,9 +908,9 @@ namespace NSCSQLite
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
-            return Dispatch(*reader.first, rdb, instance, env, [rdb, sql, params = std::move(params)]() -> QueryResult
-                            { return rdb->executeJson(sql, params); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &res)
-                            { inst->state->adapter.resolveWithRows(deferred, res); });
+            return DispatchRead(instance, *reader.first, rdb, env, [rdb, sql, params = std::move(params)]() -> QueryResult
+                                { return rdb->executeJson(sql, params); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &res)
+                                { inst->state->adapter.resolveWithRows(deferred, res); });
         }
 
         static napi_value AsyncSelectArray(napi_env env, napi_callback_info info)
@@ -760,9 +928,9 @@ namespace NSCSQLite
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
-            return Dispatch(*reader.first, rdb, instance, env, [rdb, sql, params = std::move(params)]() -> QueryResult
-                            { return rdb->executeArrayJson(sql, params); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &res)
-                            { inst->state->adapter.resolveWithArrayResult(deferred, res); });
+            return DispatchRead(instance, *reader.first, rdb, env, [rdb, sql, params = std::move(params)]() -> QueryResult
+                                { return rdb->executeArrayJson(sql, params); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &res)
+                                { inst->state->adapter.resolveWithArrayResult(deferred, res); });
         }
 
         static napi_value AsyncGet(napi_env env, napi_callback_info info)
@@ -780,9 +948,9 @@ namespace NSCSQLite
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
-            return Dispatch(*reader.first, rdb, instance, env, [rdb, sql, params = std::move(params)]() -> QueryResult
-                            { return rdb->executeGetJson(sql, params); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &res)
-                            { inst->state->adapter.resolveWithFirstRow(deferred, res); });
+            return DispatchRead(instance, *reader.first, rdb, env, [rdb, sql, params = std::move(params)]() -> QueryResult
+                                { return rdb->executeGetJson(sql, params); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &res)
+                                { inst->state->adapter.resolveWithFirstRow(deferred, res); });
         }
 
         static napi_value AsyncGetArray(napi_env env, napi_callback_info info)
@@ -800,9 +968,9 @@ namespace NSCSQLite
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
-            return Dispatch(*reader.first, rdb, instance, env, [rdb, sql, params = std::move(params)]() -> QueryResult
-                            { return rdb->executeGetArrayJson(sql, params); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &res)
-                            { inst->state->adapter.resolveWithFirstArrayRow(deferred, res); });
+            return DispatchRead(instance, *reader.first, rdb, env, [rdb, sql, params = std::move(params)]() -> QueryResult
+                                { return rdb->executeGetArrayJson(sql, params); }, [](DBInstance *inst, napi_deferred deferred, const QueryResult &res)
+                                { inst->state->adapter.resolveWithFirstArrayRow(deferred, res); });
         }
 
         //  Sync Methods

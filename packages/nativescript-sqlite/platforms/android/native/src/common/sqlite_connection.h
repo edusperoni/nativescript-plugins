@@ -89,6 +89,11 @@ public:
     // since. Only meaningful while isOpen() is false.
     QueryResult unavailableError() const;
 
+    // Gives a connection that was never opened the failure that stopped it being
+    // opened — the writer's, for a reader the pool never started. Callable from
+    // another thread, and ignored once this connection has a verdict of its own.
+    void        recordOpenFailure(const QueryResult& error);
+
     // ── Execute ─────────────────────────────────────────────────────────────
     // Runs SQL, binds params, returns full QueryResult (rows + metadata).
     QueryResult execute(const std::string& sql, const ParamList& params = {});
@@ -157,9 +162,12 @@ private:
     void        bindParams(sqlite3_stmt* stmt, const ParamList& params);
     void        setError(const std::string& msg, int code);
 
-    // Runs one open-time statement; on failure records the error, closes the
-    // handle and returns false, leaving the connection not-open.
-    bool        runOpenStatement(const std::string& sql);
+    // Runs one statement of the open sequence; on failure records "<what> failed:
+    // <sqlite message>", closes the handle and returns false, leaving the
+    // connection not-open. secret, when given, is text the reported message may
+    // not contain.
+    bool        runOpenStatement(const std::string& what, const std::string& sql,
+                                 const std::string* secret = nullptr);
 
     // The open sequence itself; open() wraps it to capture the failure.
     bool        runOpenSequence(const OpenOptions& opts);
@@ -181,8 +189,10 @@ private:
     std::string lastError_{};
     int         lastCode_{SQLITE_OK};
 
-    // Recorded once, by the open that failed, and never overwritten by the
-    // errors of the calls that are turned away afterwards.
+    // Recorded once — by the open that failed, or by recordOpenFailure for a
+    // connection that was never given one — and never overwritten by the errors
+    // of the calls that are turned away afterwards. Guarded by errorMutex_
+    // because recordOpenFailure writes it from another thread.
     bool        openFailed_{false};
     QueryResult openError_{};
 
