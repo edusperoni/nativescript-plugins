@@ -95,6 +95,12 @@ export async function runBenchmarks(opts?: RunBenchmarksOptions): Promise<BenchR
 		const message = err && (err as Error).message ? (err as Error).message : String(err);
 		const stack = err && (err as Error).stack ? (err as Error).stack : '';
 		console.log(`[NSCBENCH_ERROR] ${message}\n${stack}`);
+		// Release builds drop console output, so the failure also has to be observable as a file.
+		try {
+			File.fromPath(knownFolders.documents().path + '/nscsqlite-bench-' + label + '.error.txt').writeTextSync(`${message}\n${stack}`);
+		} catch (writeErr) {
+			/* nothing else to report through */
+		}
 		throw err;
 	}
 }
