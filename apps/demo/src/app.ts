@@ -1,11 +1,12 @@
 import { Application } from '@nativescript/core';
 import { runBenchmarks, RunBenchmarksOptions } from '../../../tools/demo/nativescript-sqlite/benchmark';
 import { runCorrectnessTests, RunCorrectnessTestsOptions } from '../../../tools/demo/nativescript-sqlite/test-suite';
+import { runEncryptedWalTest, RunEncryptedWalOptions } from '../../../tools/demo/nativescript-sqlite/encrypted-wal';
 
 const BENCH_START_DELAY_MS = 1500;
 const BENCH_LAUNCH_FALLBACK_MS = 6000;
 
-type BenchRequest = { mode: 'full' | 'quick'; options: RunBenchmarksOptions } | { mode: 'test'; options: RunCorrectnessTestsOptions };
+type BenchRequest = { mode: 'full' | 'quick'; options: RunBenchmarksOptions } | { mode: 'test'; options: RunCorrectnessTestsOptions } | { mode: 'encwal'; options: RunEncryptedWalOptions };
 
 function readBenchRequest(): BenchRequest | null {
 	try {
@@ -15,9 +16,9 @@ function readBenchRequest(): BenchRequest | null {
 		const intent = activity && activity.getIntent();
 		if (!intent) return null;
 		const mode = intent.getStringExtra('nscbench');
-		if (mode !== 'full' && mode !== 'quick' && mode !== 'test') return null;
+		if (mode !== 'full' && mode !== 'quick' && mode !== 'test' && mode !== 'encwal') return null;
 		const label = intent.getStringExtra('nscbenchLabel') || undefined;
-		if (mode === 'test') return { mode, options: { label } };
+		if (mode === 'test' || mode === 'encwal') return { mode, options: { label } };
 		return {
 			mode,
 			options: {
@@ -38,9 +39,12 @@ function scheduleBench() {
 	setTimeout(() => {
 		const request = readBenchRequest();
 		if (!request) return;
-		const run: Promise<unknown> = request.mode === 'test' ? runCorrectnessTests(request.options) : runBenchmarks(request.options);
+		let run: Promise<unknown>;
+		if (request.mode === 'test') run = runCorrectnessTests(request.options);
+		else if (request.mode === 'encwal') run = runEncryptedWalTest(request.options);
+		else run = runBenchmarks(request.options);
 		run.catch(() => {
-			/* the runner already logged its [NSCBENCH_ERROR]/[NSCTEST_ERROR] line */
+			/* the runner already logged its [NSCBENCH_ERROR]/[NSCTEST_ERROR]/[NSCENCWAL_ERROR] line */
 		});
 	}, BENCH_START_DELAY_MS);
 }

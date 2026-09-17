@@ -85,28 +85,49 @@ function buildTests(demo: DemoSharedNativescriptSqlite): TestEntry[] {
 		{ name: 'testRuntimeInfo', run: () => demo.testRuntimeInfo() },
 		{ name: 'testInMemoryDB', run: () => demo.testInMemoryDB() },
 		{ name: 'testLowLevelTransactions', run: () => demo.testLowLevelTransactions() },
+		{ name: 'testOnOpen', run: () => demo.testOnOpen() },
+		{ name: 'testSerialized', run: () => demo.testSerialized() },
+		{ name: 'testKeyFormatValidation', run: () => demo.testKeyFormatValidation() },
+		{ name: 'testSyncOnClosedDatabase', run: () => demo.testSyncOnClosedDatabase() },
 		{ name: 'testSQLCipher', requiresSQLCipher: true, run: () => demo.testSQLCipher() },
 	];
 }
 
-// A plain SQLite build silently ignores `PRAGMA key`, so the encryption test would pass without encrypting anything.
+function removeProbeFiles(path: string): void {
+	for (const suffix of ['', '-wal', '-shm']) {
+		if (File.exists(path + suffix)) File.fromPath(path + suffix).remove();
+	}
+}
+
+// A SQLite with no codec accepts `PRAGMA key` and writes plaintext, so no compile
+// option or pragma identifies a codec across engines. Whether a keyed database is
+// unreadable without its key does, whichever engine is linked.
 async function detectSQLCipher(): Promise<boolean> {
-	let probe: SQLiteDatabase;
+	const path = knownFolders.documents().path + '/_nsc_codec_probe.db';
+	removeProbeFiles(path);
+
 	try {
-		probe = openDatabase({ path: ':memory:' });
+		const keyed = openDatabase({ path, encryptionKey: 'codec-probe-key' });
+		try {
+			await keyed.execute('CREATE TABLE probe (x INTEGER)');
+		} finally {
+			await keyed.close();
+		}
 	} catch (err) {
+		removeProbeFiles(path);
 		return false;
 	}
+
+	let plain: SQLiteDatabase | undefined;
 	try {
-		return probe.getRuntimeInfo().compileOptions.includes(SQLCIPHER_COMPILE_OPTION);
-	} catch (err) {
+		plain = openDatabase({ path });
+		await plain.select('SELECT x FROM probe');
 		return false;
+	} catch (err) {
+		return true;
 	} finally {
-		try {
-			await probe.close();
-		} catch (closeErr) {
-			/* the probe database is disposable */
-		}
+		if (plain) await plain.close().catch(() => undefined);
+		removeProbeFiles(path);
 	}
 }
 

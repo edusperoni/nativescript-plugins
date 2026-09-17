@@ -16,6 +16,20 @@ function assertApprox(actual: number, expected: number, tolerance: number, msg: 
 	if (Math.abs(actual - expected) > tolerance) throw new Error(`ASSERT FAILED: ${msg} — expected ~${expected} ±${tolerance}, got ${actual}`);
 }
 
+/** Asserts that `path` cannot be read with `key` — the only engine-independent proof that a database really is encrypted. */
+async function assertUnreadable(path: string, key: string | undefined, msg: string): Promise<void> {
+	let db: SQLiteDatabase | undefined;
+	try {
+		db = openDatabase(key === undefined ? { path } : { path, encryptionKey: key });
+		await db.select(`SELECT val FROM secret`);
+	} catch (e) {
+		return;
+	} finally {
+		if (db) await db.close().catch(() => undefined);
+	}
+	throw new Error(`ASSERT FAILED: ${msg}`);
+}
+
 function tempDb(name: string): string {
 	const p = knownFolders.documents().path + `/${name}`;
 	if (File.exists(p)) File.fromPath(p).remove();
@@ -588,6 +602,10 @@ n      INTEGER
 			await this.testRuntimeInfo();
 			await this.testInMemoryDB();
 			await this.testLowLevelTransactions();
+			await this.testOnOpen();
+			await this.testSerialized();
+			await this.testKeyFormatValidation();
+			await this.testSyncOnClosedDatabase();
 			await this.testSQLCipher();
 			console.log('[ALL] All tests PASSED');
 		} finally {
@@ -595,7 +613,148 @@ n      INTEGER
 		}
 	}
 
-	// ── 12. SQLCipher (Android optional dep) ──────────────────────────────────
+	// ── 12. onOpen statements ─────────────────────────────────────────────────
+	async testOnOpen() {
+		const TAG = '[OnOpen]';
+		// foreign_keys is per-connection and off by default, so reading it back
+		// tells us which connections actually ran the statement.
+		const db = openDatabase({ path: tempDb('test_onopen.db'), poolSize: 2, serialized: false, onOpen: ['PRAGMA foreign_keys=ON'] });
+		try {
+			this.log(TAG, 'Checking the writer connection...');
+			await db.transaction(async (tx) => {
+				const row = await tx.get<{ foreign_keys: number }>(`PRAGMA foreign_keys`);
+				assertEqual(row!.foreign_keys, 1, 'writer ran onOpen');
+			});
+			this.log(TAG, '  → writer ✓');
+
+			this.log(TAG, 'Checking every reader connection...');
+			for (let i = 0; i < 4; i++) {
+				const row = await db.get<{ foreign_keys: number }>(`PRAGMA foreign_keys`);
+				assertEqual(row!.foreign_keys, 1, `reader ${i} ran onOpen`);
+			}
+			this.log(TAG, '  → readers ✓');
+
+			this.log(TAG, 'Checking the sync connection...');
+			const syncRow = db.getSync<{ foreign_keys: number }>(`PRAGMA foreign_keys`);
+			assertEqual(syncRow!.foreign_keys, 1, 'sync connection ran onOpen');
+			this.log(TAG, '  → sync ✓');
+		} finally {
+			await db.close();
+		}
+
+		this.log(TAG, 'A failing onOpen statement must abort the open...');
+		let threw = false;
+		try {
+			openDatabase({ path: tempDb('test_onopen_fail.db'), onOpen: ['SELECT * FROM table_that_does_not_exist'] });
+		} catch (e) {
+			threw = true;
+			assert(e instanceof SQLiteError, 'a failing onOpen should throw SQLiteError');
+			this.log(TAG, `  → SQLiteError code=${(e as SQLiteError).code}: ${(e as SQLiteError).message} ✓`);
+		}
+		assert(threw, 'a failing onOpen statement should abort the open');
+		console.log(TAG, 'PASSED');
+	}
+
+	// ── 13. Serialized mode ───────────────────────────────────────────────────
+	async testSerialized() {
+		const TAG = '[Serialized]';
+		this.log(TAG, 'Opening a file database with serialized: true...');
+		const db = openDatabase({ path: tempDb('test_serialized.db'), serialized: true });
+		try {
+			await db.execute(`CREATE TABLE s (id INTEGER PRIMARY KEY, v TEXT)`);
+			await db.execute(`INSERT INTO s VALUES (1, 'a')`);
+
+			this.log(TAG, 'Reading with no reader pool...');
+			const rows = await db.select<{ v: string }>(`SELECT v FROM s ORDER BY id`);
+			assertEqual(rows.length, 1, 'serialized select');
+			assertEqual(rows[0].v, 'a', 'serialized select value');
+
+			this.log(TAG, 'Writing in a transaction...');
+			await db.transaction(async (tx) => {
+				await tx.execute(`INSERT INTO s VALUES (2, 'b')`);
+				const seen = await tx.select(`SELECT v FROM s`);
+				assertEqual(seen.length, 2, 'serialized read inside its own transaction');
+			});
+
+			this.log(TAG, 'Reading through the sync API...');
+			const count = db.getSync<{ n: number }>(`SELECT COUNT(*) AS n FROM s`);
+			assertEqual(count!.n, 2, 'serialized sync read');
+
+			this.log(TAG, 'Running a prepared statement...');
+			const stmt = await db.prepare(`SELECT v FROM s WHERE id = ?`);
+			const prepared = await stmt.select<{ v: string }>([2]);
+			assertEqual(prepared[0].v, 'b', 'serialized prepared statement');
+			await stmt.finalize();
+
+			console.log(TAG, 'PASSED');
+		} finally {
+			await db.close();
+		}
+	}
+
+	// ── 14. encryptionKeyFormat validation ────────────────────────────────────
+	// Runs without a codec: the key is resolved in JavaScript before it reaches
+	// SQLite.
+	async testKeyFormatValidation() {
+		const TAG = '[KeyFormat]';
+		const rawHex = 'a'.repeat(64);
+
+		this.log(TAG, 'A raw-shaped key without encryptionKeyFormat must be rejected...');
+		let threw = false;
+		try {
+			openDatabase({ path: tempDb('test_keyfmt1.db'), encryptionKey: `x'${rawHex}'` });
+		} catch (e) {
+			threw = true;
+			this.log(TAG, `  → ${(e as Error).message} ✓`);
+		}
+		assert(threw, "a key shaped like x'<hex>' should be rejected without encryptionKeyFormat: 'raw'");
+
+		this.log(TAG, 'A raw key that is not 64 or 96 hex digits must be rejected...');
+		threw = false;
+		try {
+			openDatabase({ path: tempDb('test_keyfmt2.db'), encryptionKey: 'not-hex', encryptionKeyFormat: 'raw' });
+		} catch (e) {
+			threw = true;
+			this.log(TAG, `  → ${(e as Error).message} ✓`);
+		}
+		assert(threw, 'a malformed raw key should be rejected');
+
+		console.log(TAG, 'PASSED');
+	}
+
+	// ── 15. Sync methods on a closed database ─────────────────────────────────
+	async testSyncOnClosedDatabase() {
+		const TAG = '[SyncClosed]';
+		const db = openDatabase({ path: tempDb('test_syncclosed.db') });
+		await db.close();
+
+		const check = (name: string, call: () => unknown) => {
+			let threw = false;
+			let result: unknown;
+			try {
+				result = call();
+			} catch (e) {
+				threw = true;
+			}
+			// A rejected promise instead of a throw is the failure this guards
+			// against; swallow it so it does not surface as an unhandled rejection.
+			if (result && typeof (result as Promise<unknown>).then === 'function') {
+				(result as Promise<unknown>).catch(() => {});
+			}
+			assert(threw, `${name} on a closed database must throw synchronously`);
+			this.log(TAG, `  → ${name} threw ✓`);
+		};
+
+		check('executeSync', () => db.executeSync(`SELECT 1`));
+		check('selectSync', () => db.selectSync(`SELECT 1`));
+		check('selectArraySync', () => db.selectArraySync(`SELECT 1`));
+		check('getSync', () => db.getSync(`SELECT 1`));
+		check('getArraySync', () => db.getArraySync(`SELECT 1`));
+
+		console.log(TAG, 'PASSED');
+	}
+
+	// ── 16. Encryption (needs a SQLite built with a codec) ────────────────────
 	async testSQLCipher() {
 		const TAG = '[SQLCipher]';
 		const path = tempDb('test_cipher.db');
@@ -622,10 +781,45 @@ n      INTEGER
 			assert(row != null, 'row should exist after reopen');
 			assertEqual(row!.val, 'hidden', 'encrypted value survives close/reopen');
 			this.log(TAG, `  → val='${row!.val}' ✓`);
-			console.log(TAG, 'PASSED');
 		} finally {
 			await db2.close();
 		}
+
+		// The file must be unreadable without the key. Without this the test would
+		// also pass against a SQLite with no codec, which accepts `PRAGMA key` and
+		// writes plaintext.
+		this.log(TAG, 'Reopening without the key must fail...');
+		await assertUnreadable(path, undefined, 'a keyed database must not be readable without the key');
+		this.log(TAG, '  → unreadable ✓');
+
+		this.log(TAG, 'Reopening with a wrong key must fail...');
+		await assertUnreadable(path, 'the-wrong-key', 'a keyed database must not be readable with a wrong key');
+		this.log(TAG, '  → unreadable ✓');
+
+		// A raw key skips the per-connection PBKDF2 derivation; it is a different
+		// key from the same characters as a passphrase, so it needs its own file.
+		const rawPath = tempDb('test_cipher_raw.db');
+		const rawKey = '0123456789abcdef'.repeat(4);
+		this.log(TAG, 'Round-tripping a raw key...');
+		const db3 = openDatabase({ path: rawPath, encryptionKey: rawKey, encryptionKeyFormat: 'raw' });
+		try {
+			await db3.execute(`CREATE TABLE secret (id INTEGER PRIMARY KEY, val TEXT)`);
+			await db3.execute(`INSERT INTO secret VALUES (1, 'raw')`);
+		} finally {
+			await db3.close();
+		}
+		const db4 = openDatabase({ path: rawPath, encryptionKey: rawKey, encryptionKeyFormat: 'raw' });
+		try {
+			const row = await db4.get<{ val: string }>(`SELECT val FROM secret WHERE id = 1`);
+			assertEqual(row!.val, 'raw', 'raw-key value survives close/reopen');
+			this.log(TAG, `  → val='${row!.val}' ✓`);
+		} finally {
+			await db4.close();
+		}
+		await assertUnreadable(rawPath, rawKey, 'a raw key and the same characters as a passphrase are different keys');
+		this.log(TAG, '  → passphrase form does not open the raw-keyed file ✓');
+
+		console.log(TAG, 'PASSED');
 	}
 
 	// ── Benchmarks ──────────────────────────────────────────────────────────────
