@@ -1,10 +1,13 @@
 import { Application } from '@nativescript/core';
 import { runBenchmarks, RunBenchmarksOptions } from '../../../tools/demo/nativescript-sqlite/benchmark';
+import { runCorrectnessTests, RunCorrectnessTestsOptions } from '../../../tools/demo/nativescript-sqlite/test-suite';
 
 const BENCH_START_DELAY_MS = 1500;
 const BENCH_LAUNCH_FALLBACK_MS = 6000;
 
-function readBenchRequest(): RunBenchmarksOptions | null {
+type BenchRequest = { mode: 'full' | 'quick'; options: RunBenchmarksOptions } | { mode: 'test'; options: RunCorrectnessTestsOptions };
+
+function readBenchRequest(): BenchRequest | null {
 	try {
 		const androidApp = Application.android;
 		if (!androidApp) return null;
@@ -12,11 +15,16 @@ function readBenchRequest(): RunBenchmarksOptions | null {
 		const intent = activity && activity.getIntent();
 		if (!intent) return null;
 		const mode = intent.getStringExtra('nscbench');
-		if (mode !== 'full' && mode !== 'quick') return null;
+		if (mode !== 'full' && mode !== 'quick' && mode !== 'test') return null;
+		const label = intent.getStringExtra('nscbenchLabel') || undefined;
+		if (mode === 'test') return { mode, options: { label } };
 		return {
-			quick: mode === 'quick',
-			label: intent.getStringExtra('nscbenchLabel') || undefined,
-			filter: intent.getStringExtra('nscbenchFilter') || undefined,
+			mode,
+			options: {
+				quick: mode === 'quick',
+				label,
+				filter: intent.getStringExtra('nscbenchFilter') || undefined,
+			},
 		};
 	} catch (err) {
 		return null;
@@ -30,8 +38,9 @@ function scheduleBench() {
 	setTimeout(() => {
 		const request = readBenchRequest();
 		if (!request) return;
-		runBenchmarks(request).catch(() => {
-			/* runBenchmarks already logged [NSCBENCH_ERROR] */
+		const run: Promise<unknown> = request.mode === 'test' ? runCorrectnessTests(request.options) : runBenchmarks(request.options);
+		run.catch(() => {
+			/* the runner already logged its [NSCBENCH_ERROR]/[NSCTEST_ERROR] line */
 		});
 	}, BENCH_START_DELAY_MS);
 }
