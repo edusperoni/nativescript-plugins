@@ -94,9 +94,8 @@ export interface DatabaseOptions {
 	 */
 	onOpen?: string[];
 	/**
-	 * Run every operation on a single serialized connection instead of the
-	 * writer + reader pool. In serialized mode at most one transaction is active
-	 * at a time and reads never run concurrently with writes.
+	 * Run every operation on the writer connection alone, with no reader pool.
+	 * Reads then never run concurrently with writes.
 	 *
 	 * Defaults to `true` for in-memory databases (`:memory:`, an empty path, or a
 	 * `mode=memory` URI) — a pool of separate connections cannot share a private
@@ -105,6 +104,21 @@ export interface DatabaseOptions {
 	 * in-memory database to opt into a shared-cache pool).
 	 */
 	serialized?: boolean;
+	/**
+	 * Open every connection on a background thread instead of opening the writer
+	 * before `openDatabase()` returns.
+	 *
+	 * The default is `false`: the writer is opened synchronously, so a bad path
+	 * or a wrong encryption key throws from `openDatabase()` itself. Readers are
+	 * opened by their own threads either way.
+	 *
+	 * With `true`, `openDatabase()` returns immediately and never throws for an
+	 * open failure — the failure surfaces through `initialized()` and through
+	 * every operation afterwards instead. Worth it when the key is a passphrase:
+	 * the derivation costs hundreds of milliseconds, and this keeps all of it off
+	 * the JavaScript thread.
+	 */
+	asyncOpen?: boolean;
 }
 
 /** The shape SQLCipher reads as key bytes instead of stretching as a passphrase. */
@@ -155,7 +169,22 @@ export interface RuntimeInfo {
 	compileOptions: string[];
 }
 
-export interface ReadTransaction {
+/**
+ * The synchronous reads every transaction object offers.
+ *
+ * They run on the connection that owns the transaction and see its uncommitted
+ * state. Unlike the database-level sync methods they are never refused while a
+ * transaction is open — they are the sanctioned way in. Using a transaction
+ * object after it has committed or rolled back throws `SQLITE_MISUSE`.
+ */
+export interface SyncReads {
+	selectSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T[];
+	selectArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T>;
+	getSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T | undefined;
+	getArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T>;
+}
+
+export interface ReadTransaction extends SyncReads {
 	select<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T[]>;
 	selectArray<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult<T>>;
 	get<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): Promise<T | undefined>;
@@ -164,7 +193,30 @@ export interface ReadTransaction {
 
 export interface Transaction extends ReadTransaction {
 	execute(sql: string, params?: SQLiteParams): Promise<void>;
+	executeSync(sql: string, params?: SQLiteParams): void;
 	savepoint<T>(fn: (tx: Transaction) => Promise<T>): Promise<T>;
+}
+
+/**
+ * The transaction handed to `transactionSync`. Synchronous throughout: the
+ * callback runs between BEGIN and COMMIT with the connection held, so nothing
+ * dispatched asynchronously can interleave with it.
+ */
+export interface SyncTransaction extends SyncReads {
+	executeSync(sql: string, params?: SQLiteParams): void;
+	savepointSync<T>(fn: (tx: SyncTransaction) => T): T;
+}
+
+export interface ExecuteSyncOptions {
+	/**
+	 * Run the statement inside whichever transaction is currently open instead of
+	 * refusing. The write is then committed or rolled back with that transaction.
+	 *
+	 * An escape hatch for code that cannot be handed the transaction object; when
+	 * no transaction is open it makes no difference. Prefer the transaction
+	 * object's own `executeSync`, which cannot be wrong about what it joins.
+	 */
+	joinTransaction?: boolean;
 }
 
 export interface PreparedStatement {
@@ -186,9 +238,39 @@ export interface SQLiteDatabase {
 	transaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T>;
 	readTransaction<T>(fn: (tx: ReadTransaction) => Promise<T>): Promise<T>;
 
+	/**
+	 * Runs a transaction without yielding: BEGIN, the callback, COMMIT — or
+	 * ROLLBACK and a rethrow if the callback throws.
+	 *
+	 * The writer connection is held for the whole callback, so nothing dispatched
+	 * asynchronously runs inside the transaction. Work queued before it runs
+	 * first; work started from inside the callback — an un-awaited `execute()`,
+	 * say — runs only after the transaction has committed or rolled back, and so
+	 * is not part of it.
+	 *
+	 * The callback must be synchronous. Returning a thenable rolls the
+	 * transaction back and throws, because its continuation could not run inside
+	 * the transaction anyway.
+	 */
+	transactionSync<T>(fn: (tx: SyncTransaction) => T): T;
+
 	prepare(sql: string): Promise<PreparedStatement>;
 
-	executeSync(sql: string, params?: SQLiteParams): void;
+	/**
+	 * The synchronous methods share the writer connection with the asynchronous
+	 * ones, mutually exclusive and in the order the work was issued: a sync call
+	 * runs inline when the writer is idle, and otherwise waits behind whatever is
+	 * already queued on it. So a sync read sees the rows an open transaction has
+	 * written but not yet committed, and a sync call after a burst of un-awaited
+	 * `execute()` calls sees all of them.
+	 *
+	 * `executeSync` throws `SQLITE_BUSY` while a transaction opened through
+	 * `transaction()` or `beginTransaction()` is still active: that statement
+	 * would silently join the transaction. Use that transaction's own
+	 * `executeSync`, or pass `{ joinTransaction: true }` to say you meant to join
+	 * it. Sync reads stay allowed.
+	 */
+	executeSync(sql: string, params?: SQLiteParams, options?: ExecuteSyncOptions): void;
 	selectSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T[];
 	selectArraySync<T extends SQLiteValue[] = SQLiteValue[]>(sql: string, params?: SQLiteParams): SQLiteArrayResult<T>;
 	getSync<T extends SQLiteRow = SQLiteRow>(sql: string, params?: SQLiteParams): T | undefined;
@@ -199,12 +281,28 @@ export interface SQLiteDatabase {
 	executeInTransaction(txId: number, sql: string, params?: SQLiteParams): Promise<void>;
 	selectInTransaction(txId: number, sql: string, params?: SQLiteParams): Promise<SQLiteRow[]>;
 	selectArrayInTransaction(txId: number, sql: string, params?: SQLiteParams): Promise<SQLiteArrayResult>;
+	executeInTransactionSync(txId: number, sql: string, params?: SQLiteParams): void;
+	selectInTransactionSync(txId: number, sql: string, params?: SQLiteParams): SQLiteRow[];
+	selectArrayInTransactionSync(txId: number, sql: string, params?: SQLiteParams): SQLiteArrayResult;
 	commitTransaction(txId: number): Promise<void>;
 	rollbackTransaction(txId: number): Promise<void>;
 
 	getRuntimeInfo(): RuntimeInfo;
 
+	/**
+	 * Resolves once every connection is open, or rejects with the error that
+	 * failed the open.
+	 *
+	 * Awaiting it is optional. Asynchronous methods queue behind the opens on
+	 * their own and reject with the same error if one failed; synchronous methods
+	 * block until the writer is open and then run or throw. It is there for
+	 * callers that want the failure at a point of their choosing — in particular
+	 * with `asyncOpen`, where `openDatabase()` cannot throw.
+	 */
+	initialized(): Promise<void>;
+
 	close(): Promise<void>;
+	/** True from `openDatabase()` until `close()`, including while connections are still opening. */
 	readonly isOpen: boolean;
 }
 

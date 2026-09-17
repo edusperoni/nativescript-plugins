@@ -1,6 +1,6 @@
-import { DatabaseOptions, RuntimeInfo, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, ReadTransaction, Transaction, PreparedStatement, SQLiteDatabase } from './common';
+import { DatabaseOptions, ExecuteSyncOptions, RuntimeInfo, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, ReadTransaction, SyncReads, SyncTransaction, Transaction, PreparedStatement, SQLiteDatabase } from './common';
 
-export { DatabaseOptions, RuntimeInfo, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, ReadTransaction, Transaction, PreparedStatement, SQLiteDatabase };
+export { DatabaseOptions, ExecuteSyncOptions, RuntimeInfo, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, ReadTransaction, SyncReads, SyncTransaction, Transaction, PreparedStatement, SQLiteDatabase };
 export { isInMemoryPath, resolveEncryptionKey } from './common';
 export {
 	SQLITE_OK,
