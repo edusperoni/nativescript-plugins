@@ -3,4 +3,8 @@ export * from './nativescript-mqtt';
 export * from './nativescript-ripple';
 export * from './nativescript-sms-inbox';
 export * from './nativescript-sqlite';
+export { runCorrectnessTests } from './nativescript-sqlite/test-suite';
+export type { RunCorrectnessTestsOptions } from './nativescript-sqlite/test-suite';
+export { runEncryptedWalTest } from './nativescript-sqlite/encrypted-wal';
+export type { RunEncryptedWalOptions } from './nativescript-sqlite/encrypted-wal';
 export * from './nativescript-supabase';

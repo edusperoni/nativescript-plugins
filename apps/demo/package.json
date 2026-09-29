@@ -14,7 +14,7 @@
 		"@edusperoni/nativescript-sqlite": "file:../../packages/nativescript-sqlite"
 	},
 	"devDependencies": {
-		"@nativescript/android": "~8.9.0",
+		"@nativescript/android": "~9.1.1",
 		"@nativescript/ios": "~8.9.0"
 	}
 }

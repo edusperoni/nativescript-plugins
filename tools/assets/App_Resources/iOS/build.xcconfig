@@ -4,3 +4,8 @@
 // To build for device with Xcode 8 you need to specify your development team. More info: https://developer.apple.com/library/prerelease/content/releasenotes/DeveloperTools/RN-Xcode/Introduction.html
 // DEVELOPMENT_TEAM = YOUR_TEAM_ID;
 ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+
+// @edusperoni/nativescript-sqlite declares no SQLite of its own on iOS: it
+// compiles against <sqlite3.h> and links whatever the app provides. Without
+// this the app fails to link with undefined _sqlite3_* symbols.
+OTHER_LDFLAGS = $(inherited) -lsqlite3
