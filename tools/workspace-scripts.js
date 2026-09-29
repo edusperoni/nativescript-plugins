@@ -89,6 +89,13 @@ module.exports = {
 					description: '@edusperoni/nativescript-supabase: Build',
 				},
 			},
+			// @edusperoni/nativescript-sqlite
+			'nativescript-sqlite': {
+				build: {
+					script: 'nx run nativescript-sqlite:build.all',
+					description: '@edusperoni/nativescript-sqlite: Build',
+				},
+			},
 			'build-all': {
 				script: 'nx run-many --all --target=build.all',
 				description: 'Build all packages',
@@ -114,6 +121,10 @@ module.exports = {
 			'nativescript-supabase': {
 				script: 'nx run nativescript-supabase:focus',
 				description: 'Focus on @edusperoni/nativescript-supabase',
+			},
+			'nativescript-sqlite': {
+				script: 'nx run nativescript-sqlite:focus',
+				description: 'Focus on @edusperoni/nativescript-sqlite',
 			},
 			reset: {
 				script: 'nx g @nativescript/plugin-tools:focus-packages',

@@ -10,6 +10,7 @@
         <Button text="nativescript-mqtt" tap="{{ viewDemo }}" class="btn btn-primary view-demo"/>
         <Button text="nativescript-ripple" tap="{{ viewDemo }}" class="btn btn-primary view-demo"/>
 <Button text="nativescript-supabase" tap="{{ viewDemo }}" class="btn btn-primary rounded view-demo"/>
+<Button text="nativescript-sqlite" tap="{{ viewDemo }}" class="btn btn-primary rounded view-demo"/>
       </StackLayout>
     </ScrollView>
   </StackLayout>
