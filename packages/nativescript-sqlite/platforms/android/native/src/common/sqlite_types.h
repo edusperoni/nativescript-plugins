@@ -92,6 +92,31 @@ namespace NSCSQLite
         std::vector<std::string> compileOptions{};
     };
 
+    // -- Open sequence ------------------------------------------------------------
+    // The numbers are the wire format the JS layer sends; it resolves and
+    // validates the whole sequence, so a connection runs the list as given.
+
+    enum class OpenStepKind : uint8_t
+    {
+        Sql = 0, // run OpenStep::sql
+        Key = 1, // apply OpenOptions::encryptionKey
+        Wal = 2, // switch the journal mode to WAL
+    };
+
+    enum class OpenStepScope : uint8_t
+    {
+        All = 0,
+        Writer = 1,
+        Readers = 2,
+    };
+
+    struct OpenStep
+    {
+        OpenStepKind kind{OpenStepKind::Sql};
+        OpenStepScope scope{OpenStepScope::All};
+        std::string sql{};
+    };
+
     // -- Open options -------------------------------------------------------------
 
     struct OpenOptions
@@ -99,16 +124,15 @@ namespace NSCSQLite
         std::string path{};
         bool readOnly{false};
         bool noMutex{false}; // SQLITE_OPEN_NOMUTEX — safe when only one thread accesses this connection; enables stmt cache
+        bool isWriter{true}; // which scoped steps of openSequence apply; the serialized connection is the writer
         int busyTimeoutMs{5000};
         // Operand of PRAGMA key, already resolved by the JS layer — the connection
         // quotes it but never reinterprets it.
         std::string encryptionKey{};
-        // Run on this connection after PRAGMA key and before journalWAL/queryOnly.
-        // A statement that fails aborts the open.
-        std::vector<std::string> onOpen{};
-        bool journalWAL{false}; // PRAGMA journal_mode=WAL
-        bool queryOnly{false};  // PRAGMA query_only=ON
-        int poolSize{0};        // 0 = hardware_concurrency
+        // This connection's whole setup, in order. A step that fails aborts the open.
+        std::vector<OpenStep> openSequence{};
+        bool queryOnly{false}; // PRAGMA query_only=ON, after the sequence
+        int poolSize{0};       // 0 = hardware_concurrency
     };
 
 } // namespace NSCSQLite

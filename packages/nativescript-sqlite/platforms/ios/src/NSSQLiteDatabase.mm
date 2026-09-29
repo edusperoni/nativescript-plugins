@@ -44,6 +44,46 @@ static std::string encryptionKeyLiteral(const std::string &key) {
     return literal;
 }
 
+/// Stands in for a message that quoted the key back.
+static const char *const kKeyStepFailedMessage = "the encryption key could not be applied";
+
+// MARK: - Open Sequence
+
+/// The numbers are the wire format the JS layer sends; it resolves and validates
+/// the whole sequence, so a connection runs the list as given.
+enum class OpenStepKind : uint8_t {
+    Sql = 0,  ///< run OpenStep::sql
+    Key = 1,  ///< apply ConnectionOpenOptions::encryptionKey
+    Wal = 2,  ///< switch the journal mode to WAL
+};
+
+enum class OpenStepScope : uint8_t {
+    All = 0,
+    Writer = 1,
+    Readers = 2,
+};
+
+struct OpenStep {
+    OpenStepKind kind = OpenStepKind::Sql;
+    OpenStepScope scope = OpenStepScope::All;
+    std::string sql;
+};
+
+/// One connection's setup. `isWriter` carries the role on its own because
+/// `queryOnly` cannot stand in for it: readers of a read-only database get no
+/// `PRAGMA query_only`, yet still have to skip the writer's steps.
+struct ConnectionOpenOptions {
+    std::string path;
+    int flags = 0;
+    int busyTimeoutMs = 0;
+    /// Operand of PRAGMA key, already resolved by the JS layer — the connection
+    /// quotes it but never reinterprets it.
+    std::string encryptionKey;
+    bool isWriter = true;
+    bool readOnly = false;
+    bool queryOnly = false;  ///< PRAGMA query_only=ON, after the sequence
+};
+
 // MARK: - JSON String Builder
 
 class JSONBuilder {
@@ -138,8 +178,8 @@ public:
         failed_ = true;
     }
 
-    bool open(const std::string &path, int flags, int busyTimeoutMs, const std::string &encryptionKey, const std::vector<std::string> &onOpen, OpenFailure &outError) {
-        if (!openConnection(path, flags, busyTimeoutMs, encryptionKey, onOpen, outError)) {
+    bool open(const ConnectionOpenOptions &opts, const std::vector<OpenStep> &sequence, OpenFailure &outError) {
+        if (!openConnection(opts, sequence, outError)) {
             recordOpenFailure(outError);
             return false;
         }
@@ -148,8 +188,8 @@ public:
     }
 
 private:
-    bool openConnection(const std::string &path, int flags, int busyTimeoutMs, const std::string &encryptionKey, const std::vector<std::string> &onOpen, OpenFailure &outError) {
-        int rc = sqlite3_open_v2(path.c_str(), &db_, flags, nullptr);
+    bool openConnection(const ConnectionOpenOptions &opts, const std::vector<OpenStep> &sequence, OpenFailure &outError) {
+        int rc = sqlite3_open_v2(opts.path.c_str(), &db_, opts.flags, nullptr);
         if (rc != SQLITE_OK) {
             // sqlite3_open_v2 still hands back a handle on most failures, and the
             // message only lives on that handle — so read it before closing.
@@ -159,38 +199,64 @@ private:
             if (db_) { sqlite3_close(db_); db_ = nullptr; }
             return false;
         }
-        path_ = path;
+        path_ = opts.path;
         sqlite3_extended_result_codes(db_, 1);
-        sqlite3_busy_timeout(db_, busyTimeoutMs);
+        sqlite3_busy_timeout(db_, opts.busyTimeoutMs);
 
-        if (!encryptionKey.empty()) {
-            std::string pragmaSQL = "PRAGMA key = " + encryptionKeyLiteral(encryptionKey);
-            if (!execPragma(pragmaSQL.c_str(), outError)) {
-                close();
-                return false;
+        // The order is the caller's, and SQLite constrains it: the key has to
+        // precede anything that reads the database, which is also why
+        // sqlite3_auto_extension cannot stand in for these statements — an
+        // auto-extension runs inside sqlite3_open_v2, before any key is applied.
+        //
+        // A step skipped by scope keeps its index, so the index a failure reports
+        // is the one the caller wrote.
+        for (size_t i = 0; i < sequence.size(); i++) {
+            const OpenStep &step = sequence[i];
+            if (step.scope == OpenStepScope::Writer && !opts.isWriter) continue;
+            if (step.scope == OpenStepScope::Readers && opts.isWriter) continue;
+
+            const std::string what = "open step " + std::to_string(i);
+            switch (step.kind) {
+                case OpenStepKind::Sql:
+                    if (step.sql.empty()) continue;
+                    if (!runOpenStatement(what, step.sql.c_str(), nullptr, outError)) return false;
+                    break;
+
+                case OpenStepKind::Key: {
+                    if (opts.encryptionKey.empty()) continue;
+                    const std::string pragmaSQL = "PRAGMA key = " + encryptionKeyLiteral(opts.encryptionKey);
+                    if (!runOpenStatement(what, pragmaSQL.c_str(), &opts.encryptionKey, outError)) return false;
+                    break;
+                }
+
+                case OpenStepKind::Wal:
+                    if (!opts.isWriter || opts.readOnly) continue;
+                    if (!runOpenStatement(what, "PRAGMA journal_mode=WAL", nullptr, outError)) return false;
+                    break;
             }
         }
 
-        // Runs after the key, so these statements are the first ones that can
-        // read the database. That ordering is the point: setup which needs a
-        // readable schema — registering an FTS5 tokenizer, for instance — cannot
-        // use sqlite3_auto_extension, because auto-extensions run inside
-        // sqlite3_open_v2, before any key has been applied.
-        for (const std::string &sql : onOpen) {
-            if (!execPragma(sql.c_str(), outError)) {
-                close();
-                return false;
-            }
+        // Not part of the sequence: a reader stays a reader whatever the caller asked for.
+        if (opts.queryOnly && !runOpenStatement("query_only", "PRAGMA query_only=ON", nullptr, outError)) {
+            return false;
         }
 
         return true;
     }
 
-public:
-    bool configureWAL(OpenFailure &outError) {
-        return execPragma("PRAGMA journal_mode=WAL", outError);
+    bool runOpenStatement(const std::string &what, const char *sql, const std::string *secret, OpenFailure &outError) {
+        if (execPragma(sql, outError)) return true;
+        // SQLite quotes the offending token back in a few of its messages, and the
+        // key is one thing that may never be quoted back.
+        if (secret && !secret->empty() && outError.message.find(*secret) != std::string::npos) {
+            outError.message = kKeyStepFailedMessage;
+        }
+        outError.message = what + " failed: " + outError.message;
+        close();
+        return false;
     }
 
+public:
     void close() {
         if (db_) {
             sqlite3_close_v2(db_);
@@ -565,7 +631,7 @@ static const char *const kActiveWriteTxMessage =
 
     std::string _path;
     std::string _encryptionKey;
-    std::vector<std::string> _onOpen;
+    std::vector<OpenStep> _openSequence;
     int _busyTimeoutMs;
     BOOL _readOnly;
     BOOL _isOpen;
@@ -579,6 +645,8 @@ static const char *const kActiveWriteTxMessage =
     NSError *_openError;
     NSMutableArray *_initCompletions;
     dispatch_group_t _writerOpenGroup;
+    std::atomic<bool> _writerOpenFailed;
+    OpenFailure _writerOpenFailure;
 
     std::mutex _txMutex;
     bool _hasActiveWriteTx;
@@ -601,12 +669,12 @@ static const char *const kActiveWriteTxMessage =
                     readOnly:(BOOL)readOnly
                  busyTimeout:(int)busyTimeoutMs
                encryptionKey:(NSString *)encryptionKey
-                      onOpen:(NSArray<NSString *> *)onOpen
+                openSequence:(NSArray<NSDictionary<NSString *, id> *> *)openSequence
                   serialized:(BOOL)serialized
                    asyncOpen:(BOOL)asyncOpen
                        error:(NSError **)error {
     NSSQLiteDatabase *db = [[NSSQLiteDatabase alloc] init];
-    if (![db _openWithPath:path poolSize:poolSize readOnly:readOnly busyTimeout:busyTimeoutMs encryptionKey:encryptionKey onOpen:onOpen serialized:serialized asyncOpen:asyncOpen error:error]) {
+    if (![db _openWithPath:path poolSize:poolSize readOnly:readOnly busyTimeout:busyTimeoutMs encryptionKey:encryptionKey openSequence:openSequence serialized:serialized asyncOpen:asyncOpen error:error]) {
         return nil;
     }
     return db;
@@ -617,7 +685,7 @@ static const char *const kActiveWriteTxMessage =
              readOnly:(BOOL)readOnly
           busyTimeout:(int)busyTimeoutMs
         encryptionKey:(NSString *)encryptionKey
-               onOpen:(NSArray<NSString *> *)onOpen
+         openSequence:(NSArray<NSDictionary<NSString *, id> *> *)openSequence
            serialized:(BOOL)serialized
             asyncOpen:(BOOL)asyncOpen
                 error:(NSError **)error {
@@ -626,12 +694,19 @@ static const char *const kActiveWriteTxMessage =
     _busyTimeoutMs = busyTimeoutMs;
     _readOnly = readOnly;
     _encryptionKey = encryptionKey ? [encryptionKey UTF8String] : "";
-    _onOpen.clear();
-    for (NSString *sql in onOpen) {
-        if (sql.length) {
-            _onOpen.emplace_back([sql UTF8String]);
-        }
+    // Read once, into plain values: the sequence outlives this call on queues the
+    // JS side never touches.
+    _openSequence.clear();
+    _openSequence.reserve(openSequence.count);
+    for (NSDictionary<NSString *, id> *entry in openSequence) {
+        OpenStep step;
+        step.kind = (OpenStepKind)[entry[@"kind"] intValue];
+        step.scope = (OpenStepScope)[entry[@"scope"] intValue];
+        NSString *sql = entry[@"sql"];
+        if ([sql isKindOfClass:[NSString class]]) step.sql = [sql UTF8String];
+        _openSequence.push_back(std::move(step));
     }
+    _writerOpenFailed.store(false, std::memory_order_relaxed);
     _readerIndex = 0;
     _nextTxId = 1;
     _nextStmtId = 1;
@@ -701,19 +776,23 @@ static const char *const kActiveWriteTxMessage =
         ? (SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX)
         : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX)) | SQLITE_OPEN_URI;
 
-    BOOL ok = _writerConn.open(_path, flags, _busyTimeoutMs, _encryptionKey, _onOpen, failure);
+    ConnectionOpenOptions opts;
+    opts.path = _path;
+    opts.flags = flags;
+    opts.busyTimeoutMs = _busyTimeoutMs;
+    opts.encryptionKey = _encryptionKey;
+    opts.isWriter = true;
+    opts.readOnly = _readOnly;
+
+    BOOL ok = _writerConn.open(opts, _openSequence, failure);
     if (!ok) {
         NSLog(@"[NSSQLiteDatabase] Failed to open writer: %s", failure.message.c_str());
-    } else if (!_readOnly && !_writerConn.configureWAL(failure)) {
-        // Enable WAL for read/write databases. For in-memory databases the pragma
-        // is a harmless no-op (journal mode stays "memory").
-        NSLog(@"[NSSQLiteDatabase] Failed to enable WAL: %s", failure.message.c_str());
-        _writerConn.close();
-        _writerConn.recordOpenFailure(failure);
-        ok = NO;
+        _writerOpenFailure = failure;
+        if (outFailure) *outFailure = failure;
     }
 
-    if (!ok && outFailure) *outFailure = failure;
+    // The verdict the readers act on, published before they are let through.
+    _writerOpenFailed.store(!ok, std::memory_order_release);
     dispatch_group_leave(_writerOpenGroup);
     [self _connectionOpenFinished:ok ? nil : [self _errorFromOpenFailure:failure]];
     return ok;
@@ -723,21 +802,35 @@ static const char *const kActiveWriteTxMessage =
     dispatch_group_wait(_writerOpenGroup, DISPATCH_TIME_FOREVER);
     SQLiteConnection *reader = _readerConns[index];
 
+    // A reader never touches a file the writer could not set up. It takes on the
+    // writer's failure so that work routed here still says why the database is
+    // unusable, rather than that it is closed.
+    if (_writerOpenFailed.load(std::memory_order_acquire)) {
+        reader->recordOpenFailure(_writerOpenFailure);
+        [self _connectionOpenFinished:[self _errorFromOpenFailure:_writerOpenFailure]];
+        return;
+    }
+
     // Readers open as READWRITE so they can initialize WAL shared memory (SHM).
     // READONLY connections cannot create/map the SHM file, which causes "unable to
     // open database file" errors when the DB is already in WAL mode.
     // PRAGMA query_only=ON prevents accidental writes through these connections.
     int flags = (_readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI;
 
+    ConnectionOpenOptions opts;
+    opts.path = _path;
+    opts.flags = flags;
+    opts.busyTimeoutMs = _busyTimeoutMs;
+    opts.encryptionKey = _encryptionKey;
+    opts.isWriter = false;
+    opts.readOnly = _readOnly;
+    opts.queryOnly = !_readOnly;
+
     OpenFailure failure;
-    if (!reader->open(_path, flags, _busyTimeoutMs, _encryptionKey, _onOpen, failure)) {
+    if (!reader->open(opts, _openSequence, failure)) {
         NSLog(@"[NSSQLiteDatabase] Failed to open reader %d: %s", index, failure.message.c_str());
         [self _connectionOpenFinished:[self _errorFromOpenFailure:failure]];
         return;
-    }
-    if (!_readOnly) {
-        std::string error;
-        reader->execute("PRAGMA query_only=ON", error);
     }
     [self _connectionOpenFinished:nil];
 }

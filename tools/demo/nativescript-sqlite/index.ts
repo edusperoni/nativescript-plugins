@@ -1,6 +1,6 @@
 ﻿import { knownFolders, File } from '@nativescript/core';
 import { DemoSharedBase } from '../utils';
-import { DatabaseOptions, openDatabase, SQLiteDatabase, SQLiteError, SQLITE_BUSY, SQLITE_CONSTRAINT, SQLITE_ERROR, SQLITE_MISUSE, SQLITE_NOTADB } from '@edusperoni/nativescript-sqlite';
+import { DatabaseOptions, OpenStep, openDatabase, SQLiteDatabase, SQLiteError, SQLITE_BUSY, SQLITE_CONSTRAINT, SQLITE_ERROR, SQLITE_MISUSE, SQLITE_NOTADB } from '@edusperoni/nativescript-sqlite';
 import { runBenchmarks } from './benchmark';
 
 export { runBenchmarks } from './benchmark';
@@ -616,8 +616,12 @@ n      INTEGER
 			await this.testTransactionSync();
 			await this.testJoinTransaction();
 			await this.testAsyncOpen();
+			await this.testOpenSequenceValidation();
+			await this.testOpenSequence();
+			await this.testOpenSequenceWriterFirst();
 			await this.testSQLCipher();
 			await this.testKeyedOpenLatency();
+			await this.testOpenSequenceBeforeKey();
 			console.log('[ALL] All tests PASSED');
 		} finally {
 			this.verbose = prev;
@@ -1098,6 +1102,20 @@ n      INTEGER
 			await db2.close();
 		}
 
+		// Awaiting initialized() is documented as optional, so a read issued before
+		// the connections are open has to queue rather than be turned away.
+		this.log(TAG, 'A pooled read issued before initialization, without awaiting it...');
+		const db3 = openDatabase({ path: tempDb('test_asyncopen3.db'), asyncOpen: true, poolSize: 2 });
+		try {
+			await db3.execute(`CREATE TABLE c (x INTEGER)`);
+			await db3.execute(`INSERT INTO c VALUES (3)`);
+			const rows = await db3.select<{ x: number }>(`SELECT x FROM c`);
+			assertEqual(rows.length, 1, 'read issued before initialization should queue, not fail');
+			assertEqual(rows[0].x, 3, 'and return the right row');
+		} finally {
+			await db3.close();
+		}
+
 		this.log(TAG, 'Opening and closing immediately, 50 times...');
 		for (let i = 0; i < 50; i++) {
 			const d = openDatabase({ path: tempDb('test_asyncopen_loop.db'), asyncOpen: true });
@@ -1249,6 +1267,214 @@ n      INTEGER
 		}
 		assert(asyncRejected, 'an async method should reject with the open error');
 		await bad.close();
+
+		// A pooled read would land on a reader the pool never started; it has to
+		// report why the database could not be opened, not that it is closed.
+		this.log(TAG, 'A pooled read issued before a failing open settles...');
+		const bad2 = openDatabase({ path, encryptionKey: 'not-the-key', poolSize: 2, asyncOpen: true });
+		let readRejected = false;
+		try {
+			await bad2.select(`SELECT 1`);
+		} catch (e) {
+			readRejected = true;
+			assertEqual((e as SQLiteError).code, SQLITE_NOTADB, 'a pooled read should report the open error');
+		}
+		assert(readRejected, 'a pooled read on a failed open should reject');
+		await bad2.close();
+
+		console.log(TAG, 'PASSED');
+	}
+
+	// ── 25. openSequence validation (no codec needed) ─────────────────────────
+	async testOpenSequenceValidation() {
+		const TAG = '[OpenSeqValidation]';
+
+		const rejects = (msg: string, options: DatabaseOptions) => {
+			let threw = false;
+			let db: SQLiteDatabase | undefined;
+			try {
+				db = openDatabase(options);
+			} catch (e) {
+				threw = true;
+				assert(e instanceof SQLiteError, `${msg}: should throw SQLiteError`);
+				assertEqual((e as SQLiteError).code, SQLITE_MISUSE, `${msg}: should report SQLITE_MISUSE`);
+				this.log(TAG, `  → ${(e as SQLiteError).message} ✓`);
+			}
+			if (db) db.close().catch(() => undefined);
+			assert(threw, `${msg}: should have thrown`);
+		};
+
+		this.log(TAG, 'onOpen and openSequence together...');
+		rejects('onOpen + openSequence', { path: tempDb('test_seq_both.db'), onOpen: ['PRAGMA user_version = 1'], openSequence: [OpenStep.key, OpenStep.wal] });
+
+		this.log(TAG, 'A repeated marker...');
+		rejects('duplicate key', { path: tempDb('test_seq_dupkey.db'), openSequence: [OpenStep.key, OpenStep.key, OpenStep.wal] });
+		rejects('duplicate wal', { path: tempDb('test_seq_dupwal.db'), openSequence: [OpenStep.key, OpenStep.wal, OpenStep.wal] });
+
+		this.log(TAG, 'A key with no key step must be refused, and must create no file...');
+		const orphan = knownFolders.documents().path + '/test_seq_nokey.db';
+		if (File.exists(orphan)) File.fromPath(orphan).remove();
+		rejects('encryptionKey without OpenStep.key', { path: orphan, encryptionKey: 'some-key', openSequence: [OpenStep.wal] });
+		assert(!File.exists(orphan), 'a refused sequence must not have created the database file');
+
+		this.log(TAG, 'wal before key with a key set...');
+		rejects('wal before key', { path: tempDb('test_seq_order.db'), encryptionKey: 'some-key', openSequence: [OpenStep.wal, OpenStep.key] });
+
+		this.log(TAG, 'A malformed entry...');
+		rejects('bad scope', { path: tempDb('test_seq_scope.db'), openSequence: [OpenStep.key, { sql: 'PRAGMA user_version = 1', on: 'nobody' as any }, OpenStep.wal] });
+
+		console.log(TAG, 'PASSED');
+	}
+
+	// ── 26. openSequence behaviour (no codec needed) ──────────────────────────
+	async testOpenSequence() {
+		const TAG = '[OpenSequence]';
+
+		this.log(TAG, 'The default sequence and its explicit spelling must agree...');
+		const viaOnOpen = openDatabase({ path: tempDb('test_seq_a.db'), onOpen: ['PRAGMA user_version = 7'] });
+		const viaSequence = openDatabase({ path: tempDb('test_seq_b.db'), openSequence: [OpenStep.key, 'PRAGMA user_version = 7', OpenStep.wal] });
+		try {
+			const a = viaOnOpen.getSync<{ user_version: number }>(`PRAGMA user_version`);
+			const b = viaSequence.getSync<{ user_version: number }>(`PRAGMA user_version`);
+			assertEqual(a!.user_version, 7, 'onOpen applied');
+			assertEqual(b!.user_version, 7, 'openSequence applied');
+			assertEqual(viaOnOpen.getSync<{ journal_mode: string }>(`PRAGMA journal_mode`)!.journal_mode, 'wal', 'onOpen still gets WAL');
+			assertEqual(viaSequence.getSync<{ journal_mode: string }>(`PRAGMA journal_mode`)!.journal_mode, 'wal', 'explicit wal step');
+		} finally {
+			await viaOnOpen.close();
+			await viaSequence.close();
+		}
+
+		this.log(TAG, 'Leaving out the wal step leaves the journal mode alone...');
+		const noWal = openDatabase({ path: tempDb('test_seq_nowal.db'), openSequence: [OpenStep.key], serialized: true });
+		try {
+			await noWal.execute(`CREATE TABLE t (x INTEGER)`);
+			assertEqual(noWal.getSync<{ journal_mode: string }>(`PRAGMA journal_mode`)!.journal_mode, 'delete', 'a new file keeps its rollback journal without a wal step');
+		} finally {
+			await noWal.close();
+		}
+
+		this.log(TAG, 'A writer-scoped page_size before wal takes effect on a new file...');
+		const paged = openDatabase({ path: tempDb('test_seq_page.db'), openSequence: [OpenStep.key, { sql: 'PRAGMA page_size = 8192', on: 'writer' }, OpenStep.wal] });
+		try {
+			await paged.execute(`CREATE TABLE t (x INTEGER)`);
+			assertEqual(paged.getSync<{ page_size: number }>(`PRAGMA page_size`)!.page_size, 8192, 'page_size applied before WAL');
+			assertEqual(paged.getSync<{ journal_mode: string }>(`PRAGMA journal_mode`)!.journal_mode, 'wal', 'still WAL');
+		} finally {
+			await paged.close();
+		}
+
+		this.log(TAG, 'Scoping is observable from the pool...');
+		const scoped = openDatabase({
+			path: tempDb('test_seq_scoped.db'),
+			poolSize: 2,
+			serialized: false,
+			openSequence: [OpenStep.key, { sql: 'PRAGMA cache_size = -1234', on: 'readers' }, { sql: 'PRAGMA cache_size = -4321', on: 'writer' }, OpenStep.wal],
+		});
+		try {
+			// A sync read runs on the writer; an async read goes to a reader.
+			assertEqual(scoped.getSync<{ cache_size: number }>(`PRAGMA cache_size`)!.cache_size, -4321, 'writer-scoped step applied to the writer');
+			for (let i = 0; i < 4; i++) {
+				const seen = await scoped.get<{ cache_size: number }>(`PRAGMA cache_size`);
+				assertEqual(seen!.cache_size, -1234, `reader ${i} got the reader-scoped step`);
+			}
+		} finally {
+			await scoped.close();
+		}
+
+		// A step is named by its index, not quoted back. SQLite's own diagnostic
+		// still names the object it could not resolve, which is the half worth
+		// keeping; what must not appear is the statement the caller wrote.
+		this.log(TAG, 'A failing step reports its index, not the statement...');
+		const failingSql = 'SELECT nosuchcolumn FROM sqlite_schema';
+		let threw = false;
+		try {
+			openDatabase({ path: tempDb('test_seq_fail.db'), openSequence: [OpenStep.key, failingSql, OpenStep.wal] });
+		} catch (e) {
+			threw = true;
+			const err = e as SQLiteError;
+			assert(err instanceof SQLiteError, 'should throw SQLiteError');
+			assert(typeof err.code === 'number' && err.code !== 0, 'should carry a SQLite code');
+			assert(/open step 1 failed/.test(err.message), `message should name the step index, got: ${err.message}`);
+			assert(err.message.indexOf(failingSql) === -1, `message must not repeat the statement, got: ${err.message}`);
+			this.log(TAG, `  → ${err.message} ✓`);
+		}
+		assert(threw, 'a failing open step should abort the open');
+
+		console.log(TAG, 'PASSED');
+	}
+
+	// ── 27. Writer-first ordering under asyncOpen ─────────────────────────────
+	async testOpenSequenceWriterFirst() {
+		const TAG = '[WriterFirst]';
+		this.log(TAG, 'Fresh file + asyncOpen + pool, 30 times...');
+		for (let i = 0; i < 30; i++) {
+			const db = openDatabase({
+				path: tempDb('test_seq_writerfirst.db'),
+				asyncOpen: true,
+				poolSize: 4,
+				openSequence: [OpenStep.key, { sql: 'PRAGMA page_size = 8192', on: 'writer' }, OpenStep.wal],
+			});
+			try {
+				await db.initialized();
+				await db.execute(`CREATE TABLE t (x INTEGER)`);
+				const page = db.getSync<{ page_size: number }>(`PRAGMA page_size`);
+				const mode = db.getSync<{ journal_mode: string }>(`PRAGMA journal_mode`);
+				assertEqual(page!.page_size, 8192, `round ${i}: page_size must be set before any reader touched the file`);
+				assertEqual(mode!.journal_mode, 'wal', `round ${i}: journal mode`);
+				for (let r = 0; r < 4; r++) {
+					const row = await db.get<{ n: number }>(`SELECT count(*) AS n FROM t`);
+					assertEqual(row!.n, 0, `round ${i}: pooled read ${r}`);
+				}
+			} finally {
+				await db.close();
+			}
+		}
+		this.log(TAG, '  → 30/30 ✓');
+		console.log(TAG, 'PASSED');
+	}
+
+	// ── 28. A step before the key (needs a codec) ─────────────────────────────
+	async testOpenSequenceBeforeKey() {
+		const TAG = '[OpenSeqBeforeKey]';
+		const path = tempDb('test_seq_cipher.db');
+		const key = 'sequence-cipher-key';
+		// A non-default cipher has to be selected before the key is applied, so
+		// this only works if the step really runs first.
+		const sequence = [{ sql: "PRAGMA cipher = 'chacha20'" }, OpenStep.key, OpenStep.wal];
+
+		this.log(TAG, 'Creating with a cipher selected before the key...');
+		const db = openDatabase({ path, encryptionKey: key, openSequence: sequence, serialized: true });
+		try {
+			await db.execute(`CREATE TABLE secret (id INTEGER PRIMARY KEY, val TEXT)`);
+			await db.execute(`INSERT INTO secret VALUES (1, 'hidden')`);
+		} finally {
+			await db.close();
+		}
+
+		this.log(TAG, 'The default sequence with the same key must NOT open it...');
+		await assertUnreadable(path, key, 'a database created under a non-default cipher must not open with the default sequence');
+
+		this.log(TAG, 'The same sequence and key must open it...');
+		const again = openDatabase({ path, encryptionKey: key, openSequence: sequence, serialized: true });
+		try {
+			const row = await again.get<{ val: string }>(`SELECT val FROM secret WHERE id = 1`);
+			assertEqual(row!.val, 'hidden', 'reopened under the same sequence');
+		} finally {
+			await again.close();
+		}
+
+		this.log(TAG, 'A failing key step must not put the key in the message...');
+		let threw = false;
+		try {
+			openDatabase({ path, encryptionKey: 'the-wrong-key-entirely', openSequence: sequence, serialized: true });
+		} catch (e) {
+			threw = true;
+			const message = (e as SQLiteError).message;
+			assert(message.indexOf('the-wrong-key-entirely') === -1, `the key must never appear in an error, got: ${message}`);
+			this.log(TAG, `  → ${message} ✓`);
+		}
+		assert(threw, 'a wrong key should still fail the open');
 
 		console.log(TAG, 'PASSED');
 	}

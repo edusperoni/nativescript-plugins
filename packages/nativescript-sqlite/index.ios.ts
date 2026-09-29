@@ -1,4 +1,4 @@
-import { DatabaseOptions, RuntimeInfo, SQLITE_ERROR, SQLITE_MISUSE, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, isInMemoryPath, resolveEncryptionKey } from './common';
+import { DatabaseOptions, NativeOpenStep, RuntimeInfo, SQLITE_ERROR, SQLITE_MISUSE, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, isInMemoryPath, resolveEncryptionKey, resolveOpenSequence } from './common';
 import type { PreparedStatement, ReadTransaction, SQLiteDatabase, Transaction } from '.';
 
 export { DatabaseOptions, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, RuntimeInfo };
@@ -7,7 +7,7 @@ export * from './common';
 
 declare class NSSQLiteDatabase extends NSObject {
 	/** Returns null with `error` set when the writer cannot be opened, unless asyncOpen is true. */
-	static openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeyOnOpenSerializedAsyncOpenError(path: string, poolSize: number, readOnly: boolean, busyTimeout: number, encryptionKey: string | null, onOpen: string[], serialized: boolean, asyncOpen: boolean, error: interop.Reference<NSError>): NSSQLiteDatabase;
+	static openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeyOpenSequenceSerializedAsyncOpenError(path: string, poolSize: number, readOnly: boolean, busyTimeout: number, encryptionKey: string | null, openSequence: NativeOpenStep[], serialized: boolean, asyncOpen: boolean, error: interop.Reference<NSError>): NSSQLiteDatabase;
 
 	initializedWithCompletion(completion: (error: NSError) => void): void;
 
@@ -692,8 +692,10 @@ class SQLiteDatabaseImpl implements SQLiteDatabase {
 
 export function openDatabase(options: DatabaseOptions): SQLiteDatabase {
 	const serialized = options.serialized ?? isInMemoryPath(options.path);
+	// Resolved before anything native runs, so a rejected sequence leaves no file behind.
+	const openSequence = resolveOpenSequence(options);
 	const error = new interop.Reference<NSError>();
-	const native = NSSQLiteDatabase.openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeyOnOpenSerializedAsyncOpenError(options.path, options.poolSize ?? 4, options.readOnly ?? false, options.busyTimeout ?? 5000, resolveEncryptionKey(options), options.onOpen ?? [], serialized, options.asyncOpen ?? false, error);
+	const native = NSSQLiteDatabase.openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeyOpenSequenceSerializedAsyncOpenError(options.path, options.poolSize ?? 4, options.readOnly ?? false, options.busyTimeout ?? 5000, resolveEncryptionKey(options), openSequence, serialized, options.asyncOpen ?? false, error);
 	if (!native) {
 		const failure = error.value;
 		throw failure ? toOpenError(failure, options.path) : new SQLiteError(openErrorMessage(options.path), SQLITE_ERROR);
