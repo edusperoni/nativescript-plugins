@@ -1,8 +1,9 @@
 import { DEFAULT_HEADERS } from '../lib/constants';
 import { StorageError } from '../lib/common/errors';
 import { Fetch, get, post, put, remove } from '../lib/common/fetch';
+import { encodeStoragePath } from '../lib/common/helpers';
 import BaseApiClient from '../lib/common/BaseApiClient';
-import { Bucket, BucketType, ListBucketOptions } from '../lib/types';
+import { Bucket, BucketLifecycleConfiguration, BucketType, CreateSettableVersioningStatus, FetchParameters, ListBucketOptions, PurgeCacheOptions, UpdateSettableVersioningStatus } from '../lib/types';
 import { StorageClientOptions } from '../StorageClient';
 
 export default class StorageBucketApi extends BaseApiClient<StorageError> {
@@ -62,6 +63,7 @@ export default class StorageBucketApi extends BaseApiClient<StorageError> {
 			fileSizeLimit?: number | string | null;
 			allowedMimeTypes?: string[] | null;
 			type?: BucketType;
+			versioningStatus?: CreateSettableVersioningStatus;
 		} = {
 			public: false,
 		},
@@ -86,6 +88,7 @@ export default class StorageBucketApi extends BaseApiClient<StorageError> {
 					public: options.public,
 					file_size_limit: options.fileSizeLimit,
 					allowed_mime_types: options.allowedMimeTypes,
+					versioning_status: options.versioningStatus,
 				},
 				{ headers: this.headers },
 			);
@@ -98,6 +101,7 @@ export default class StorageBucketApi extends BaseApiClient<StorageError> {
 			public: boolean;
 			fileSizeLimit?: number | string | null;
 			allowedMimeTypes?: string[] | null;
+			versioningStatus?: UpdateSettableVersioningStatus;
 		},
 	): Promise<
 		| {
@@ -119,6 +123,7 @@ export default class StorageBucketApi extends BaseApiClient<StorageError> {
 					public: options.public,
 					file_size_limit: options.fileSizeLimit,
 					allowed_mime_types: options.allowedMimeTypes,
+					versioning_status: options.versioningStatus,
 				},
 				{ headers: this.headers },
 			);
@@ -153,6 +158,86 @@ export default class StorageBucketApi extends BaseApiClient<StorageError> {
 		return this.handleOperation(async () => {
 			return await remove(this.fetch, `${this.url}/bucket/${id}`, {}, { headers: this.headers });
 		});
+	}
+
+	async getBucketLifecycle(id: string): Promise<
+		| {
+				data: BucketLifecycleConfiguration;
+				error: null;
+		  }
+		| {
+				data: null;
+				error: StorageError;
+		  }
+	> {
+		return this.handleOperation(async () => {
+			return await get(this.fetch, this.bucketLifecycleUrl(id), { headers: this.headers });
+		});
+	}
+
+	async updateBucketLifecycle(
+		id: string,
+		configuration: BucketLifecycleConfiguration,
+	): Promise<
+		| {
+				data: BucketLifecycleConfiguration;
+				error: null;
+		  }
+		| {
+				data: null;
+				error: StorageError;
+		  }
+	> {
+		return this.handleOperation(async () => {
+			return await put(this.fetch, this.bucketLifecycleUrl(id), configuration, {
+				headers: this.headers,
+			});
+		});
+	}
+
+	async deleteBucketLifecycle(id: string): Promise<
+		| {
+				data: { message: string };
+				error: null;
+		  }
+		| {
+				data: null;
+				error: StorageError;
+		  }
+	> {
+		return this.handleOperation(async () => {
+			return await remove(this.fetch, this.bucketLifecycleUrl(id), {}, { headers: this.headers });
+		});
+	}
+
+	/** Requires the `service_role` key. */
+	async purgeBucketCache(
+		id: string,
+		options?: PurgeCacheOptions,
+		parameters?: FetchParameters,
+	): Promise<
+		| {
+				data: { message: string };
+				error: null;
+		  }
+		| {
+				data: null;
+				error: StorageError;
+		  }
+	> {
+		return this.handleOperation(async () => {
+			const query = new URLSearchParams();
+			if (options?.transformations) {
+				query.set('transformations', 'true');
+			}
+			const queryString = query.toString();
+
+			return await remove(this.fetch, `${this.url}/cdn/${encodeStoragePath(id)}${queryString ? `?${queryString}` : ''}`, {}, { headers: this.headers }, parameters);
+		});
+	}
+
+	private bucketLifecycleUrl(id: string): string {
+		return `${this.url}/bucket/${encodeStoragePath(id)}/lifecycle`;
 	}
 
 	private listBucketOptionsToQueryString(options?: ListBucketOptions): string {

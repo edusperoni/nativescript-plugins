@@ -44,7 +44,7 @@ const handleError = async (error: unknown, reject: (reason: StorageApiError | St
 			.json()
 			.then((err: { statusCode?: string; code?: string; error?: string; message?: string } | null) => {
 				const statusCode = err?.statusCode || err?.code || status + '';
-				reject(new StorageApiError(_getErrorMessage(err), status, statusCode, namespace));
+				reject(new StorageApiError(_getErrorMessage(err), status, statusCode, namespace, err?.code));
 			})
 			.catch(() => {
 				const statusCode = status + '';

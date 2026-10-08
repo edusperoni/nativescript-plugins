@@ -1,6 +1,6 @@
 {
 	"name": "@edusperoni/nativescript-supabase-storage",
-	"version": "2.106.0",
+	"version": "2.117.3",
 	"description": "Isomorphic storage client for Supabase, with NativeScript-specific overrides.",
 	"main": "index",
 	"typings": "index.d.ts",

@@ -43,4 +43,5 @@ When updating from a new version of `@supabase/storage-js`:
 1. Diff the upstream `src/` tree against our `lib/` + `packages/` tree.
 2. Apply upstream changes to all files **except** the two upload methods in `packages/StorageFileApi.ts` and the two helpers noted above.
 3. For the upload methods, merge any new options/fields (e.g. `metadata`, `headers`) into the NativeScript-specific code path while keeping the `Http.request()` / `HTTPFormData` machinery.
-4. Run `npx nx run nativescript-supabase:build` to verify.
+4. Set `lib/version.ts` and `package.json` to the new upstream version (`lib/version.ts` feeds the `X-Client-Info` header).
+5. Run `npx nx run nativescript-supabase:build` to verify.

@@ -68,3 +68,5 @@ export const validateVectorDimension = (vector: { float32: number[] }, expectedD
 		throw new Error(`Vector dimension mismatch: expected ${expectedDimension}, got ${vector.float32.length}`);
 	}
 };
+
+export const encodeStoragePath = (path: string): string => path.split('/').map(encodeURIComponent).join('/');

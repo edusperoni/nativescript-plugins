@@ -2,6 +2,32 @@ import { StorageError } from './common/errors';
 
 export type BucketType = 'STANDARD' | 'ANALYTICS' | (string & {});
 
+export type VersioningStatus = 'DISABLED' | 'ENABLED' | 'SUSPENDED';
+
+export type CreateSettableVersioningStatus = Exclude<VersioningStatus, 'SUSPENDED'>;
+
+export type UpdateSettableVersioningStatus = Exclude<VersioningStatus, 'DISABLED'>;
+
+export type LifecycleRuleStatus = 'Enabled' | 'Disabled';
+
+export interface NoncurrentVersionExpiration {
+	noncurrentDays: number;
+	newerNoncurrentVersions?: number;
+}
+
+export type LifecycleRuleFilter = Record<string, never>;
+
+export interface LifecycleRule {
+	id?: string;
+	status: LifecycleRuleStatus;
+	filter: LifecycleRuleFilter;
+	noncurrentVersionExpiration: NoncurrentVersionExpiration;
+}
+
+export interface BucketLifecycleConfiguration {
+	rules: LifecycleRule[];
+}
+
 export interface Bucket {
 	id: string;
 	type?: BucketType;
@@ -12,6 +38,7 @@ export interface Bucket {
 	created_at: string;
 	updated_at: string;
 	public: boolean;
+	versioning_status?: VersioningStatus;
 }
 
 export interface ListBucketOptions {
@@ -20,6 +47,10 @@ export interface ListBucketOptions {
 	sortColumn?: 'id' | 'name' | 'created_at' | 'updated_at';
 	sortOrder?: 'asc' | 'desc';
 	search?: string;
+}
+
+export interface PurgeCacheOptions {
+	transformations?: true;
 }
 
 export interface AnalyticBucket {
@@ -55,6 +86,10 @@ export interface FileObject {
 	owner?: string;
 	/** @deprecated */
 	buckets?: Bucket;
+	version?: string | null;
+	archived_at?: string | null;
+	is_delete_marker?: boolean | null;
+	is_versioned?: boolean | null;
 }
 
 export interface FileObjectV2 {
@@ -71,6 +106,9 @@ export interface FileObjectV2 {
 	metadata?: FileMetadata;
 	/** @deprecated The API returns last_modified instead. */
 	updated_at?: string;
+	archived_at?: string | null;
+	is_delete_marker?: boolean;
+	is_versioned?: boolean;
 }
 
 export interface SortBy {
@@ -87,8 +125,11 @@ export interface FileOptions {
 	headers?: Record<string, string>;
 }
 
+export type DeleteObjectEntry = string | { path: string; versionId: string };
+
 export interface DestinationOptions {
 	destinationBucket?: string;
+	sourceVersionId?: string;
 }
 
 export interface SearchOptions {
@@ -97,6 +138,11 @@ export interface SearchOptions {
 	offset?: number;
 	sortBy?: SortBy;
 	search?: string;
+	/** @default 'exclude' */
+	noncurrentVersions?: 'exclude' | 'include' | 'only';
+	/** @default 'exclude' */
+	deleteMarkers?: 'exclude' | 'include' | 'only';
+	exactMatch?: boolean;
 }
 
 export interface SortByV2 {
@@ -113,6 +159,11 @@ export interface SearchV2Options {
 	with_delimiter?: boolean;
 	/** @default 'name asc' */
 	sortBy?: SortByV2;
+	/** @default 'exclude' */
+	noncurrentVersions?: 'exclude' | 'include' | 'only';
+	/** @default 'exclude' */
+	deleteMarkers?: 'exclude' | 'include' | 'only';
+	exactMatch?: boolean;
 }
 
 export interface SearchV2Object {
@@ -124,6 +175,10 @@ export interface SearchV2Object {
 	metadata: FileMetadata | null;
 	/** @deprecated */
 	last_accessed_at: string;
+	version?: string;
+	archived_at?: string | null;
+	is_delete_marker?: boolean;
+	is_versioned?: boolean;
 }
 
 export interface SearchV2Folder {
@@ -290,7 +345,8 @@ export interface QueryVectorsOptions {
 	vectorBucketName: string;
 	indexName: string;
 	queryVector: VectorData;
-	topK?: number;
+	topK: number;
+	nextToken?: string;
 	filter?: VectorFilter;
 	returnDistance?: boolean;
 	returnMetadata?: boolean;
@@ -299,6 +355,7 @@ export interface QueryVectorsOptions {
 export interface QueryVectorsResponse {
 	vectors: VectorMatch[];
 	distanceMetric?: DistanceMetric;
+	nextToken?: string;
 }
 
 export interface VectorFetchParameters {

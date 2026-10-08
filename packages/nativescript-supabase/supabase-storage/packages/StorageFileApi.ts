@@ -1,9 +1,9 @@
 import { StorageApiError, StorageError, StorageUnknownError, isStorageError } from '../lib/common/errors';
 import { get, head, post, put, remove, Fetch } from '../lib/common/fetch';
 import { setHeader } from '../lib/common/headers';
-import { recursiveToCamel } from '../lib/common/helpers';
+import { encodeStoragePath, recursiveToCamel } from '../lib/common/helpers';
 import BaseApiClient from '../lib/common/BaseApiClient';
-import { FileObject, FileOptions, SearchOptions, FetchParameters, TransformOptions, DestinationOptions, FileObjectV2, Camelize, SearchV2Options, SearchV2Result } from '../lib/types';
+import { FileObject, FileOptions, SearchOptions, FetchParameters, TransformOptions, DestinationOptions, FileObjectV2, Camelize, SearchV2Options, SearchV2Result, PurgeCacheOptions, DeleteObjectEntry } from '../lib/types';
 import BlobDownloadBuilder from './BlobDownloadBuilder';
 import { Http, HTTPFormData, HTTPFormDataEntry } from '@klippa/nativescript-http';
 
@@ -102,7 +102,7 @@ export default class StorageFileApi extends BaseApiClient<StorageError> {
 				return { path: cleanPath, id: data?.Id ?? '', fullPath: data?.Key ?? `${this.bucketId}/${cleanPath}` };
 			} else {
 				const err = res.content?.toJSON?.() as any;
-				throw new StorageApiError(err?.message || err?.error || `Upload failed with status ${res.statusCode}`, res.statusCode, String(err?.statusCode || res.statusCode));
+				throw new StorageApiError(err?.message || err?.error || `Upload failed with status ${res.statusCode}`, res.statusCode, String(err?.statusCode || err?.code || res.statusCode), 'storage', err?.code);
 			}
 		});
 	}
@@ -184,7 +184,7 @@ export default class StorageFileApi extends BaseApiClient<StorageError> {
 				return { path: cleanPath, fullPath: data?.Key ?? `${this.bucketId}/${cleanPath}` };
 			} else {
 				const err = res.content?.toJSON?.() as any;
-				throw new StorageApiError(err?.message || err?.error || `Upload failed with status ${res.statusCode}`, res.statusCode, String(err?.statusCode || res.statusCode));
+				throw new StorageApiError(err?.message || err?.error || `Upload failed with status ${res.statusCode}`, res.statusCode, String(err?.statusCode || err?.code || res.statusCode), 'storage', err?.code);
 			}
 		});
 	}
@@ -265,6 +265,7 @@ export default class StorageFileApi extends BaseApiClient<StorageError> {
 					sourceKey: fromPath,
 					destinationKey: toPath,
 					destinationBucket: options?.destinationBucket,
+					sourceVersionId: options?.sourceVersionId,
 				},
 				{ headers: this.headers },
 			);
@@ -294,6 +295,7 @@ export default class StorageFileApi extends BaseApiClient<StorageError> {
 					sourceKey: fromPath,
 					destinationKey: toPath,
 					destinationBucket: options?.destinationBucket,
+					sourceVersionId: options?.sourceVersionId,
 				},
 				{ headers: this.headers },
 			);
@@ -308,6 +310,7 @@ export default class StorageFileApi extends BaseApiClient<StorageError> {
 			download?: string | boolean;
 			transform?: TransformOptions;
 			cacheNonce?: string;
+			versionId?: string;
 		},
 	): Promise<
 		| {
@@ -324,7 +327,16 @@ export default class StorageFileApi extends BaseApiClient<StorageError> {
 
 			const hasTransform = typeof options?.transform === 'object' && options.transform !== null && Object.keys(options.transform).length > 0;
 
-			let data = await post(this.fetch, `${this.url}/object/sign/${_path}`, { expiresIn, ...(hasTransform ? { transform: options!.transform } : {}) }, { headers: this.headers });
+			let data = await post(
+				this.fetch,
+				`${this.url}/object/sign/${_path}`,
+				{
+					expiresIn,
+					...(hasTransform ? { transform: options!.transform } : {}),
+					...(options?.versionId != null ? { versionId: options.versionId } : {}),
+				},
+				{ headers: this.headers },
+			);
 
 			const query = new URLSearchParams();
 			if (options?.download) query.set('download', options.download === true ? '' : options.download);
@@ -343,7 +355,12 @@ export default class StorageFileApi extends BaseApiClient<StorageError> {
 		options?: { download?: string | boolean; cacheNonce?: string },
 	): Promise<
 		| {
-				data: { error: string | null; path: string | null; signedUrl: string | null }[];
+				data: {
+					error: string | null;
+					path: string | null;
+					signedURL: string | null;
+					signedUrl: string | null;
+				}[];
 				error: null;
 		  }
 		| {
@@ -361,20 +378,21 @@ export default class StorageFileApi extends BaseApiClient<StorageError> {
 
 			const queryString = query.toString();
 
-			return data.map((datum: { signedURL: string }) => ({
+			return data.map((datum: { error: string | null; path: string | null; signedURL: string | null }) => ({
 				...datum,
 				signedUrl: datum.signedURL ? encodeURI(`${this.url}${datum.signedURL}${queryString ? `&${queryString}` : ''}`) : null,
 			}));
 		});
 	}
 
-	download<Options extends { transform?: TransformOptions; cacheNonce?: string }>(path: string, options?: Options, parameters?: FetchParameters): BlobDownloadBuilder {
+	download<Options extends { transform?: TransformOptions; cacheNonce?: string; versionId?: string }>(path: string, options?: Options, parameters?: FetchParameters): BlobDownloadBuilder {
 		const wantsTransformation = typeof options?.transform === 'object' && options.transform !== null && Object.keys(options.transform).length > 0;
 		const renderPath = wantsTransformation ? 'render/image/authenticated' : 'object';
 
 		const query = new URLSearchParams();
 		if (options?.transform) this.applyTransformOptsToQuery(query, options.transform);
 		if (options?.cacheNonce != null) query.set('cacheNonce', String(options.cacheNonce));
+		if (options?.versionId != null) query.set('versionId', String(options.versionId));
 		const queryString = query.toString();
 
 		const _path = this._getFinalPath(path);
@@ -391,7 +409,10 @@ export default class StorageFileApi extends BaseApiClient<StorageError> {
 		return new BlobDownloadBuilder(downloadFn, this.shouldThrowOnError);
 	}
 
-	async info(path: string): Promise<
+	async info(
+		path: string,
+		options?: { versionId?: string },
+	): Promise<
 		| {
 				data: Camelize<FileObjectV2>;
 				error: null;
@@ -402,9 +423,12 @@ export default class StorageFileApi extends BaseApiClient<StorageError> {
 		  }
 	> {
 		const _path = this._getFinalPath(path);
+		const query = new URLSearchParams();
+		if (options?.versionId != null) query.set('versionId', String(options.versionId));
+		const queryString = query.toString();
 
 		return this.handleOperation(async () => {
-			const data = await get(this.fetch, `${this.url}/object/info/${_path}`, {
+			const data = await get(this.fetch, `${this.url}/object/info/${_path}${queryString ? `?${queryString}` : ''}`, {
 				headers: this.headers,
 			});
 
@@ -452,6 +476,7 @@ export default class StorageFileApi extends BaseApiClient<StorageError> {
 			download?: string | boolean;
 			transform?: TransformOptions;
 			cacheNonce?: string;
+			versionId?: string;
 		},
 	): { data: { publicUrl: string } } {
 		const _path = this._getFinalPath(path);
@@ -460,6 +485,7 @@ export default class StorageFileApi extends BaseApiClient<StorageError> {
 		if (options?.download) query.set('download', options.download === true ? '' : options.download);
 		if (options?.transform) this.applyTransformOptsToQuery(query, options.transform);
 		if (options?.cacheNonce != null) query.set('cacheNonce', String(options.cacheNonce));
+		if (options?.versionId != null) query.set('versionId', String(options.versionId));
 		const queryString = query.toString();
 
 		const wantsTransformation = typeof options?.transform === 'object' && options.transform !== null && Object.keys(options.transform).length > 0;
@@ -472,7 +498,7 @@ export default class StorageFileApi extends BaseApiClient<StorageError> {
 		};
 	}
 
-	async remove(paths: string[]): Promise<
+	async remove(paths: DeleteObjectEntry[]): Promise<
 		| {
 				data: FileObject[];
 				error: null;
@@ -484,6 +510,33 @@ export default class StorageFileApi extends BaseApiClient<StorageError> {
 	> {
 		return this.handleOperation(async () => {
 			return await remove(this.fetch, `${this.url}/object/${this.bucketId}`, { prefixes: paths }, { headers: this.headers });
+		});
+	}
+
+	/** Requires the `service_role` key. */
+	async purgeCache(
+		path: string,
+		options?: PurgeCacheOptions,
+		parameters?: FetchParameters,
+	): Promise<
+		| {
+				data: { message: string };
+				error: null;
+		  }
+		| {
+				data: null;
+				error: StorageError;
+		  }
+	> {
+		return this.handleOperation(async () => {
+			const _path = encodeStoragePath(this._getFinalPath(path));
+			const query = new URLSearchParams();
+			if (options?.transformations) {
+				query.set('transformations', 'true');
+			}
+			const queryString = query.toString();
+
+			return await remove(this.fetch, `${this.url}/cdn/${_path}${queryString ? `?${queryString}` : ''}`, {}, { headers: this.headers }, parameters);
 		});
 	}
 
@@ -502,7 +555,8 @@ export default class StorageFileApi extends BaseApiClient<StorageError> {
 		  }
 	> {
 		return this.handleOperation(async () => {
-			const body = { ...DEFAULT_SEARCH_OPTIONS, ...options, prefix: path || '' };
+			const sortBy = options?.sortBy ? { ...DEFAULT_SEARCH_OPTIONS.sortBy, ...options.sortBy } : DEFAULT_SEARCH_OPTIONS.sortBy;
+			const body = { ...DEFAULT_SEARCH_OPTIONS, ...options, sortBy, prefix: path || '' };
 			return await post(this.fetch, `${this.url}/object/list/${this.bucketId}`, body, { headers: this.headers }, parameters);
 		});
 	}
