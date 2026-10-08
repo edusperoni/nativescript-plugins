@@ -38,9 +38,14 @@
 	"useInferencePlugins": false,
 	"defaultBase": "main",
 	"release": {
-		"releaseTagPattern": "{version}-{projectName}",
+		"releaseTagPattern": "{projectName}@{version}",
 		"projects": ["packages/*"],
 		"projectsRelationship": "independent",
+		"version": {
+			"generatorOptions": {
+				"updateDependents": "never"
+			}
+		},
 		"changelog": {
 			"workspaceChangelog": false,
 			"projectChangelogs": {
