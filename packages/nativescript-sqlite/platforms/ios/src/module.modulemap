@@ -1,0 +1,4 @@
+module NSSQLiteDatabase {
+    header "NSSQLiteDatabase.h"
+    export *
+}
