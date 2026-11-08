@@ -32,6 +32,12 @@
 		},
 		"e2e": {
 			"cache": true
+		},
+		"nx-release-publish": {
+			"dependsOn": ["build.all"],
+			"options": {
+				"packageRoot": "dist/{projectRoot}"
+			}
 		}
 	},
 	"nxCloudAccessToken": "ZjgxOTNkNmUtOGYwZS00MzJjLWIxNDgtYTg2MzY0MWMzMzUwfHJlYWQ=",
@@ -48,7 +54,9 @@
 		},
 		"changelog": {
 			"workspaceChangelog": false,
+			"automaticFromRef": true,
 			"projectChangelogs": {
+				"createRelease": "github",
 				"renderOptions": {
 					"authors": true,
 					"commitReferences": true,
