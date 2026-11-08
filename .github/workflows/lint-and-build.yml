@@ -153,8 +153,7 @@ jobs:
     if: needs.lint.outputs.demo-affected == 'true'
     runs-on: macos-latest
     timeout-minutes: 60
-    # The app can't reach the Karma server on GitHub's macOS runners yet (likely macOS 15+
-    # Local Network privacy, which can't be pre-approved on hosted runners).
+    # Non-blocking until the networking warm-up below has proven reliable.
     continue-on-error: true
     steps:
       - name: Checkout
@@ -163,12 +162,6 @@ jobs:
         with:
           node-version: lts/*
           cache: yarn
-      - name: Allow node through the application firewall
-        run: |
-          fw=/usr/libexec/ApplicationFirewall/socketfilterfw
-          sudo "$fw" --getglobalstate
-          sudo "$fw" --add "$(command -v node)"
-          sudo "$fw" --unblockapp "$(command -v node)"
       - name: Cache npm (demo app)
         uses: actions/cache@v6
         with:
@@ -196,41 +189,33 @@ jobs:
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
-      # Experiment: can the simulator reach a server on the host, on which address, and how fast?
-      - name: Probe simulator-to-host networking
+      # On GitHub's macOS runners the simulator's first connection to each host address stalls for
+      # ~20s, while the test runner tries each address once with a 3s timeout. One connection from
+      # Safari beforehand makes later connections to that address (any port, any app) immediate.
+      - name: Warm up simulator-to-host networking
         env:
           SIMULATOR: ${{ steps.simulator.outputs.udid }}
         run: |
-          node -e "require('http').createServer((q,s)=>{console.log('[sim-probe]', new Date().toISOString(), q.url);s.end('ok')}).listen(9999,'0.0.0.0',()=>console.log('[sim-probe] listening', new Date().toISOString()))" > "$RUNNER_TEMP/sim-probe.log" 2>&1 &
-          sleep 2
-          lan_ip=$(ipconfig getifaddr en0 || true)
-          echo "LAN IP: ${lan_ip:-none}"
-          date -u +"opening URLs at %Y-%m-%dT%H:%M:%SZ"
-          xcrun simctl openurl "$SIMULATOR" "http://127.0.0.1:9999/loopback" || echo "openurl loopback failed"
-          sleep 20
-          [ -n "$lan_ip" ] && { xcrun simctl openurl "$SIMULATOR" "http://$lan_ip:9999/lan" || echo "openurl lan failed"; }
-          sleep 40
-          cat "$RUNNER_TEMP/sim-probe.log"
+          log="$RUNNER_TEMP/warmup.log"
+          node -e "require('http').createServer((q,s)=>{console.log(q.url);s.end('ok')}).listen(9999,'0.0.0.0')" > "$log" 2>&1 &
+          server=$!
+          for _ in $(seq 1 20); do nc -z 127.0.0.1 9999 && break; sleep 0.5; done
+          # The test runner is handed every IPv4 address of the host.
+          ips=$(ifconfig | awk '/inet / {print $2}')
+          for ip in $ips; do xcrun simctl openurl "$SIMULATOR" "http://$ip:9999/$ip"; done
+          deadline=$((SECONDS + 90))
+          for ip in $ips; do
+            until grep -qx "/$ip" "$log"; do
+              [ "$SECONDS" -lt "$deadline" ] || { echo "::warning::simulator never reached $ip"; break; }
+              sleep 1
+            done
+          done
+          echo "Warm-up finished after ${SECONDS}s; requests received:"
+          cat "$log"
           xcrun simctl terminate "$SIMULATOR" com.apple.mobilesafari || true
-      # Experiment: give the test runner's host lookup 60s instead of 3s, to tell a slow first
-      # connection from a blocked one.
-      - name: Raise the test runner's host lookup timeout
-        run: |
-          (cd apps/demo && npm install --no-audit --no-fund)
-          f=apps/demo/node_modules/@nativescript/unit-test-runner/app/services/karma-host-resolver.js
-          sed -i '' 's/timeout: 3000/timeout: 60000/' "$f"
-          rg -n "timeout:" "$f" || grep -n "timeout:" "$f"
+          kill "$server"
       - name: Run tests
         timeout-minutes: 15
         env:
           SIMULATOR: ${{ steps.simulator.outputs.udid }}
-        run: |
-          # Diagnostics: is Karma listening, and can the host itself reach it?
-          (
-            while true; do
-              sleep 10
-              lsof -nP -iTCP:9876 -sTCP:LISTEN | tail -n +2 | sed 's/^/[probe] listen: /'
-              echo "[probe] curl 127.0.0.1: $(curl -s -m 3 -o /dev/null -w '%{http_code} %{time_total}s' http://127.0.0.1:9876/context.json || echo failed)"
-            done
-          ) &
-          yarn nx run demo:test:ios --device="$SIMULATOR" --silent
+        run: yarn nx run demo:test:ios --device="$SIMULATOR" --silent
