@@ -196,6 +196,30 @@ jobs:
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
+      # Experiment: can the simulator reach a server on the host, on which address, and how fast?
+      - name: Probe simulator-to-host networking
+        env:
+          SIMULATOR: ${{ steps.simulator.outputs.udid }}
+        run: |
+          node -e "require('http').createServer((q,s)=>{console.log('[sim-probe]', new Date().toISOString(), q.url);s.end('ok')}).listen(9999,'0.0.0.0',()=>console.log('[sim-probe] listening', new Date().toISOString()))" > "$RUNNER_TEMP/sim-probe.log" 2>&1 &
+          sleep 2
+          lan_ip=$(ipconfig getifaddr en0 || true)
+          echo "LAN IP: ${lan_ip:-none}"
+          date -u +"opening URLs at %Y-%m-%dT%H:%M:%SZ"
+          xcrun simctl openurl "$SIMULATOR" "http://127.0.0.1:9999/loopback" || echo "openurl loopback failed"
+          sleep 20
+          [ -n "$lan_ip" ] && { xcrun simctl openurl "$SIMULATOR" "http://$lan_ip:9999/lan" || echo "openurl lan failed"; }
+          sleep 40
+          cat "$RUNNER_TEMP/sim-probe.log"
+          xcrun simctl terminate "$SIMULATOR" com.apple.mobilesafari || true
+      # Experiment: give the test runner's host lookup 60s instead of 3s, to tell a slow first
+      # connection from a blocked one.
+      - name: Raise the test runner's host lookup timeout
+        run: |
+          (cd apps/demo && npm install --no-audit --no-fund)
+          f=apps/demo/node_modules/@nativescript/unit-test-runner/app/services/karma-host-resolver.js
+          sed -i '' 's/timeout: 3000/timeout: 60000/' "$f"
+          rg -n "timeout:" "$f" || grep -n "timeout:" "$f"
       - name: Run tests
         timeout-minutes: 15
         env:
