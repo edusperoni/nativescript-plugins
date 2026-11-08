@@ -180,10 +180,10 @@ else()
     set(_ns_stub_dir "${PROJECT_SOURCE_DIR}/libs/${ANDROID_ABI}")
 endif()
 
-add_library(NativeScript SHARED IMPORTED)
-set_target_properties(NativeScript PROPERTIES
-    IMPORTED_LOCATION ${_ns_stub_dir}/libNativeScript.so
-)
+# Linked by name (-L/-l), not as an IMPORTED target: the Android Gradle plugin
+# packages IMPORTED shared libraries into the APK, where this stub would replace
+# the runtime's own libNativeScript.so (e.g. dropping the inspector from debug builds).
+target_link_directories(nscsqlite PRIVATE ${_ns_stub_dir})
 
 # Post-build strip
 add_custom_command(TARGET nscsqlite POST_BUILD COMMAND ${CMAKE_STRIP} --strip-unneeded $<TARGET_FILE:nscsqlite>)
