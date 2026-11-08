@@ -11,6 +11,7 @@
             <Button text="CRUD" tap="{{ testCRUD }}" class="btn btn-outline m-b-5"/>
             <Button text="Data Types (NULL/INT/REAL/TEXT/BLOB)" tap="{{ testDataTypes }}" class="btn btn-outline m-b-5"/>
             <Button text="Parameter Binding (positional &amp; named)" tap="{{ testParams }}" class="btn btn-outline m-b-5"/>
+            <Button text="Buffer &amp; View Params" tap="{{ testBlobParams }}" class="btn btn-outline m-b-5"/>
             <Button text="selectArray / getArray" tap="{{ testSelectArray }}" class="btn btn-outline m-b-5"/>
             <Button text="Transactions &amp; Savepoints" tap="{{ testTransactions }}" class="btn btn-outline m-b-5"/>
             <Button text="Prepared Statements" tap="{{ testPreparedStatements }}" class="btn btn-outline m-b-5"/>

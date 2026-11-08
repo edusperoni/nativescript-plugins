@@ -77,6 +77,7 @@ function buildTests(demo: DemoSharedNativescriptSqlite): TestEntry[] {
 		{ name: 'testCRUD', run: () => demo.testCRUD() },
 		{ name: 'testDataTypes', run: () => demo.testDataTypes() },
 		{ name: 'testParams', run: () => demo.testParams() },
+		{ name: 'testBlobParams', run: () => demo.testBlobParams() },
 		{ name: 'testSelectArray', run: () => demo.testSelectArray() },
 		{ name: 'testTransactions', run: () => demo.testTransactions() },
 		{ name: 'testPreparedStatements', run: () => demo.testPreparedStatements() },

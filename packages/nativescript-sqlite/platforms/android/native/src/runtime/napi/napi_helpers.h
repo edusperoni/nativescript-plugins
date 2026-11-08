@@ -60,10 +60,67 @@ inline napi_value ArrayBufferFrom(napi_env env, const uint8_t* data, size_t size
     return buffer;
 }
 
-inline bool ArrayBufferTo(napi_env env, napi_value value, std::vector<uint8_t>& out) {
+inline bool TypedArrayByteLength(napi_env env, napi_value value, napi_typedarray_type type,
+                                 size_t length, size_t* out) {
+    switch (type) {
+        case napi_int8_array:
+        case napi_uint8_array:
+        case napi_uint8_clamped_array:
+            *out = length;
+            return true;
+        case napi_int16_array:
+        case napi_uint16_array:
+            *out = length * 2;
+            return true;
+        case napi_int32_array:
+        case napi_uint32_array:
+        case napi_float32_array:
+            *out = length * 4;
+            return true;
+        case napi_float64_array:
+        case napi_bigint64_array:
+        case napi_biguint64_array:
+            *out = length * 8;
+            return true;
+        default: {
+            // Element types newer than the headers this is built against.
+            napi_value prop = nullptr;
+            double bytes = 0;
+            if (napi_get_named_property(env, value, "byteLength", &prop) != napi_ok ||
+                napi_get_value_double(env, prop, &bytes) != napi_ok || bytes < 0)
+                return false;
+            *out = static_cast<size_t>(bytes);
+            return true;
+        }
+    }
+}
+
+// Copies the bytes of an ArrayBuffer, SharedArrayBuffer, TypedArray or DataView;
+// a view contributes only its own byteOffset..byteOffset+byteLength range.
+// Returns false for any other value.
+inline bool BinaryTo(napi_env env, napi_value value, std::vector<uint8_t>& out) {
     void* data = nullptr;
     size_t size = 0;
-    if (napi_get_arraybuffer_info(env, value, &data, &size) != napi_ok) return false;
+    bool matches = false;
+    if (napi_is_typedarray(env, value, &matches) == napi_ok && matches) {
+        napi_typedarray_type type;
+        size_t length = 0;
+        // data already points at the view's first element.
+        if (napi_get_typedarray_info(env, value, &type, &length, &data, nullptr, nullptr) != napi_ok ||
+            !TypedArrayByteLength(env, value, type, length, &size))
+            return false;
+    } else if (napi_is_dataview(env, value, &matches) == napi_ok && matches) {
+        // data already points at the view's first byte.
+        if (napi_get_dataview_info(env, value, &size, &data, nullptr, nullptr) != napi_ok) return false;
+    } else if (napi_get_arraybuffer_info(env, value, &data, &size) != napi_ok) {
+        // napi_is_arraybuffer is false for a SharedArrayBuffer, but
+        // napi_get_arraybuffer_info accepts both.
+        return false;
+    }
+    if (size == 0 || data == nullptr) {
+        out.clear();
+        return true;
+    }
     const auto* bytes = static_cast<const uint8_t*>(data);
     out.assign(bytes, bytes + size);
     return true;

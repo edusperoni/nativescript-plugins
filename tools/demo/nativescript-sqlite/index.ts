@@ -184,6 +184,93 @@ n      INTEGER
 		}
 	}
 
+	// ── 3b. Buffer/view params and unsupported values ─────────────────────────
+	async testBlobParams() {
+		const TAG = '[BlobParams]';
+		const db = openDatabase({ path: tempDb('test_blob_params.db') });
+		const hex = (b: unknown) => (b instanceof ArrayBuffer ? Array.from(new Uint8Array(b), (x) => x.toString(16).padStart(2, '0')).join('') : String(b));
+		const read = async (id: number) => (await db.get<{ b: ArrayBuffer | null }>(`SELECT b FROM blobs WHERE id = ?`, [id]))!.b;
+		try {
+			await db.execute(`CREATE TABLE blobs (id INTEGER PRIMARY KEY, b BLOB)`);
+			const backing = new Uint8Array([0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17]).buffer;
+
+			this.log(TAG, 'Uint8Array with byteOffset (positional, async)...');
+			await db.execute(`INSERT INTO blobs VALUES (?, ?)`, [1, new Uint8Array(backing, 2, 3)]);
+			assertEqual(hex(await read(1)), '121314', 'Uint8Array view bytes');
+
+			this.log(TAG, 'DataView with byteOffset (named)...');
+			await db.execute(`INSERT INTO blobs VALUES (:id, :b)`, { id: 2, b: new DataView(backing, 5, 2) });
+			assertEqual(hex(await read(2)), '1516', 'DataView bytes');
+
+			this.log(TAG, 'Multi-byte element view (Int16Array) with byteOffset...');
+			await db.execute(`INSERT INTO blobs VALUES (?, ?)`, [3, new Int16Array(backing, 2, 2)]);
+			assertEqual(hex(await read(3)), '12131415', 'Int16Array view bytes');
+
+			this.log(TAG, 'SharedArrayBuffer and a view over one...');
+			const shared = new SharedArrayBuffer(4);
+			new Uint8Array(shared).set([0xa0, 0xa1, 0xa2, 0xa3]);
+			await db.execute(`INSERT INTO blobs VALUES (?, ?)`, [4, shared]);
+			assertEqual(hex(await read(4)), 'a0a1a2a3', 'SharedArrayBuffer bytes');
+			await db.execute(`INSERT INTO blobs VALUES (?, ?)`, [5, new Uint8Array(shared, 1, 2)]);
+			assertEqual(hex(await read(5)), 'a1a2', 'view over SharedArrayBuffer bytes');
+
+			this.log(TAG, 'Views through sync, prepared and transaction paths...');
+			db.executeSync(`INSERT INTO blobs VALUES (?, ?)`, [6, new Uint8Array(backing, 6, 2)]);
+			assertEqual(hex(await read(6)), '1617', 'executeSync view bytes');
+			const found = db.selectSync<{ id: number }>(`SELECT id FROM blobs WHERE b = ?`, [new Uint8Array(backing, 2, 3)]);
+			assertEqual(found.length === 1 ? found[0].id : -1, 1, 'selectSync matches a view param');
+			const stmt = await db.prepare(`INSERT INTO blobs VALUES (?, ?)`);
+			try {
+				await stmt.execute([7, new Uint8Array(backing, 1, 1)]);
+			} finally {
+				await stmt.finalize();
+			}
+			assertEqual(hex(await read(7)), '11', 'prepared statement view bytes');
+			await db.transaction(async (tx) => {
+				await tx.execute(`INSERT INTO blobs VALUES (?, ?)`, [8, new Uint8Array(backing, 7, 1)]);
+			});
+			assertEqual(hex(await read(8)), '17', 'transaction view bytes');
+
+			this.log(TAG, 'undefined still binds NULL...');
+			await db.execute(`INSERT INTO blobs VALUES (?, ?)`, [9, undefined]);
+			await db.execute(`INSERT INTO blobs VALUES (:id, :b)`, { id: 10, b: undefined });
+			assertEqual(await read(9), null, 'positional undefined → NULL');
+			assertEqual(await read(10), null, 'named undefined → NULL');
+
+			this.log(TAG, 'Unsupported values throw a TypeError naming the parameter...');
+			const count = async () => (await db.get<{ n: number }>(`SELECT count(*) AS n FROM blobs`))!.n;
+			const before = await count();
+			const expectTypeError = async (label: string, needle: string, run: () => unknown) => {
+				let error: unknown;
+				try {
+					await run();
+				} catch (e) {
+					error = e;
+				}
+				assert(error instanceof TypeError, `${label}: expected TypeError, got ${error}`);
+				assert(error.message.includes(needle), `${label}: message "${error.message}" should mention ${needle}`);
+				this.log(TAG, `  → ${label}: ${error.message} ✓`);
+			};
+			// Values that reach the binder untyped (any/unknown, column mappers).
+			const untyped = (v: unknown) => v as any;
+			await expectTypeError('Date (positional, async)', 'index 1', () => db.execute(`INSERT INTO blobs VALUES (?, ?)`, [11, untyped(new Date())]));
+			await expectTypeError('plain object (named, async)', '"b"', () => db.execute(`INSERT INTO blobs VALUES (:id, :b)`, { id: 11, b: untyped({}) }));
+			await expectTypeError('bigint (select)', 'index 0', () => db.select(`SELECT ?`, [untyped(BigInt(1))]));
+			await expectTypeError('function (sync)', 'index 1', () => db.executeSync(`INSERT INTO blobs VALUES (?, ?)`, [11, untyped(() => 0)]));
+			const badStmt = await db.prepare(`INSERT INTO blobs VALUES (?, ?)`);
+			try {
+				await expectTypeError('Date (prepared)', 'index 1', () => badStmt.execute([11, untyped(new Date())]));
+			} finally {
+				await badStmt.finalize();
+			}
+			assertEqual(await count(), before, 'rejected statements insert nothing');
+
+			console.log(TAG, 'PASSED');
+		} finally {
+			await db.close();
+		}
+	}
+
 	// ── 4. selectArray / getArray ──────────────────────────────────────────────
 	async testSelectArray() {
 		const TAG = '[SelectArray]';
@@ -597,6 +684,7 @@ n      INTEGER
 			await this.testCRUD();
 			await this.testDataTypes();
 			await this.testParams();
+			await this.testBlobParams();
 			await this.testSelectArray();
 			await this.testTransactions();
 			await this.testPreparedStatements();

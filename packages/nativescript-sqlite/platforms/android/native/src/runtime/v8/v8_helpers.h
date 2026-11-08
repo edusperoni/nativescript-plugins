@@ -56,6 +56,20 @@ inline std::vector<uint8_t> FromV8ArrayBuffer(v8::Isolate* /*isolate*/,
     return std::vector<uint8_t>(data, data + buf->ByteLength());
 }
 
+inline std::vector<uint8_t> FromV8SharedArrayBuffer(v8::Local<v8::SharedArrayBuffer> buf) {
+    auto backing = buf->GetBackingStore();
+    const uint8_t* data = static_cast<const uint8_t*>(backing->Data());
+    return std::vector<uint8_t>(data, data + buf->ByteLength());
+}
+
+// Copies only the view's own bytes (byteOffset..byteOffset+byteLength), whatever
+// kind of buffer backs it.
+inline std::vector<uint8_t> FromV8ArrayBufferView(v8::Local<v8::ArrayBufferView> view) {
+    std::vector<uint8_t> out(view->ByteLength());
+    if (!out.empty()) out.resize(view->CopyContents(out.data(), out.size()));
+    return out;
+}
+
 // ── Logging ──────────────────────────────────────────────────────────────────
 
 inline void LogToConsole(const std::string& msg) {
