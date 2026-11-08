@@ -87,11 +87,47 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      # The demo app's dependencies are installed by the NativeScript CLI with npm.
+      - name: Cache npm (demo app)
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: npm-demo-${{ runner.os }}-${{ hashFiles('apps/demo/package.json') }}
+          restore-keys: npm-demo-${{ runner.os }}-
+      # nscsqlite holds the archives the sqlite plugin downloads (see its downloads.properties).
+      - name: Cache Gradle
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.gradle/nscsqlite
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/demo/package.json', 'tools/assets/App_Resources/Android/**/*.gradle', 'packages/*/platforms/android/**/*.gradle', 'packages/*/platforms/android/**/downloads.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+      - name: Cache AVD snapshot
+        id: avd-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-${{ runner.os }}-34-x86_64-google_apis
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: false
+          disable-animations: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: echo "AVD snapshot created"
       - name: yarn install
         run: yarn
       - name: Disable NativeScript CLI reporting
@@ -106,8 +142,9 @@ jobs:
           api-level: 34
           arch: x86_64
           target: google_apis
+          force-avd-creation: false
           disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: yarn nx run demo:test:android --device=emulator-5554 --silent
 
   test-ios:
@@ -123,6 +160,12 @@ jobs:
         with:
           node-version: lts/*
           cache: yarn
+      - name: Cache npm (demo app)
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: npm-demo-${{ runner.os }}-${{ hashFiles('apps/demo/package.json') }}
+          restore-keys: npm-demo-${{ runner.os }}-
       - name: yarn install
         run: yarn
       - name: Disable NativeScript CLI reporting
