@@ -259,15 +259,9 @@ namespace NSCSQLite
                                            v8::Local<v8::Value> item)
         {
             BoundParam p;
-            if (item->IsInt32())
+            if (item->IsNumber())
             {
-                p.type = ColumnType::Integer;
-                p.intValue = item->Int32Value(ctx).ToChecked();
-            }
-            else if (item->IsNumber())
-            {
-                p.type = ColumnType::Float;
-                p.doubleValue = item->NumberValue(ctx).ToChecked();
+                SetNumberParam(p, item->NumberValue(ctx).ToChecked());
             }
             else if (item->IsString())
             {

@@ -69,8 +69,8 @@ inline bool ArrayBufferTo(napi_env env, napi_value value, std::vector<uint8_t>& 
     return true;
 }
 
-// Node-API has no IsInt32 predicate: a number binds as an integer when it is
-// exactly representable as int32, which excludes -0 the way V8 does.
+// Node-API has no IsInt32 predicate: a number counts as int32 when it is
+// exactly representable as one, which excludes -0 the way V8 does.
 inline bool IsInt32Value(double value, int32_t* out) {
     if (!(value >= -2147483648.0 && value <= 2147483647.0)) return false;
     if (value != std::trunc(value)) return false;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -80,6 +81,24 @@ namespace NSCSQLite
         std::vector<uint8_t> blobValue{};
         std::string paramName{};
     };
+
+    // A whole number within ±(2^53 - 1) binds as INTEGER, as on iOS: bound as REAL
+    // it would be stored as '1.0' in a TEXT-affinity column and no longer equal a
+    // stored '1'. -0 stays REAL so its sign survives.
+    inline void SetNumberParam(BoundParam &p, double value)
+    {
+        if (value >= -9007199254740991.0 && value <= 9007199254740991.0 &&
+            value == std::trunc(value) && !(value == 0.0 && std::signbit(value)))
+        {
+            p.type = ColumnType::Integer;
+            p.intValue = static_cast<int64_t>(value);
+        }
+        else
+        {
+            p.type = ColumnType::Float;
+            p.doubleValue = value;
+        }
+    }
 
     using ParamList = std::vector<BoundParam>;
 

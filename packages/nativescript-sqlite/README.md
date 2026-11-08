@@ -414,7 +414,7 @@ The prefix (`:`, `$`, `@`) is added automatically if omitted — you can pass `{
 | JS Type         | SQLite Type                     |
 | --------------- | ------------------------------- |
 | `string`      | TEXT                            |
-| `number`      | INTEGER or REAL (auto-detected) |
+| `number`      | INTEGER if whole and within ±(2^53 − 1), otherwise REAL |
 | `boolean`     | INTEGER (0 or 1)                |
 | `null`        | NULL                            |
 | `ArrayBuffer` | BLOB                            |

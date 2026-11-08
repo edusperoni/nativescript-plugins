@@ -304,6 +304,7 @@ private:
 // The runtime hands every JS number over as a double. An integral one in the
 // safe-integer range is bound as INTEGER, as on Android: bound as REAL, it would be
 // stored as '1.0' in a TEXT-affinity column and no longer equal a stored '1'.
+// -0 stays REAL so its sign survives.
 static void bindNumber(sqlite3_stmt *stmt, int idx, NSNumber *num) {
     const char *type = [num objCType];
     if (strcmp(type, @encode(BOOL)) == 0 || strcmp(type, @encode(char)) == 0) {
@@ -313,7 +314,8 @@ static void bindNumber(sqlite3_stmt *stmt, int idx, NSNumber *num) {
         sqlite3_bind_int64(stmt, idx, [num longLongValue]);
     } else {
         double value = [num doubleValue];
-        if (std::isfinite(value) && std::trunc(value) == value && std::fabs(value) <= 9007199254740991.0) {
+        if (std::isfinite(value) && std::trunc(value) == value && std::fabs(value) <= 9007199254740991.0 &&
+            !(value == 0.0 && std::signbit(value))) {
             sqlite3_bind_int64(stmt, idx, (sqlite3_int64)value);
         } else {
             sqlite3_bind_double(stmt, idx, value);
