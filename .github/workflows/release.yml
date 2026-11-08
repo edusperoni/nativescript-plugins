@@ -1,0 +1,105 @@
+name: Release
+
+# npm trusted publishing is configured per package on npmjs.com against this exact
+# file name (release.yml) and environment (npm). Renaming either breaks publishing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: Package to release
+        type: choice
+        required: true
+        options:
+          - nativescript-mqtt
+          - nativescript-ripple
+          - nativescript-sms-inbox
+          - nativescript-sqlite
+          - nativescript-supabase
+      bump:
+        description: Version bump (ignored when "version" is set)
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+          - prepatch
+          - preminor
+          - premajor
+          - prerelease
+      version:
+        description: Exact version (e.g. 1.2.0), overrides "bump"
+        type: string
+        required: false
+      preid:
+        description: Prerelease id for pre* bumps (e.g. rc, alpha, beta)
+        type: string
+        default: rc
+      dist-tag:
+        description: npm dist-tag (default is "latest", or the preid for prereleases)
+        type: string
+        required: false
+      dry-run:
+        description: Dry run (no commit, tag, GitHub release or publish)
+        type: boolean
+        default: true
+      publish-only:
+        description: Only build and publish the version already on main (to retry a failed publish)
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release ${{ inputs.project }}
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: write # push release commit + tag, create GitHub release
+      id-token: write # npm trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # No registry-url here: it writes an .npmrc expecting NODE_AUTH_TOKEN, and we authenticate via OIDC instead.
+      # No dependency cache either, so a poisoned cache can't end up in a published package.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Use npm 11 (trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@11 && npm --version
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: yarn install
+        run: yarn install --frozen-lockfile
+
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_CONFIG_PROVENANCE: 'true'
+          PROJECT: ${{ inputs.project }}
+          SPECIFIER: ${{ inputs.version || inputs.bump }}
+          PREID: ${{ inputs.preid }}
+          DIST_TAG: ${{ inputs.dist-tag }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          PUBLISH_ONLY: ${{ inputs.publish-only }}
+        run: |
+          args=(--project "$PROJECT" --verbose)
+          if [ "$PUBLISH_ONLY" = "true" ]; then
+            args+=(--publish-only)
+          else
+            args+=(--specifier "$SPECIFIER" --preid "$PREID")
+          fi
+          [ -n "$DIST_TAG" ] && args+=(--tag "$DIST_TAG")
+          [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
+          node tools/scripts/release.js "${args[@]}"

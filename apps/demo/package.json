@@ -8,13 +8,13 @@
 		"nativescript-ripple": "file:../../packages/nativescript-ripple",
 		"@edusperoni/nativescript-sms-inbox": "file:../../packages/nativescript-sms-inbox",
 		"@nativescript/core": "file:../../node_modules/@nativescript/core",
-		"@nativescript/unit-test-runner": "^3.0.2",
+		"@nativescript/unit-test-runner": "^4.0.1",
 		"@valor/nativescript-websockets": "^1.0.3",
 		"@edusperoni/nativescript-supabase": "file:../../packages/nativescript-supabase",
 		"@edusperoni/nativescript-sqlite": "file:../../packages/nativescript-sqlite"
 	},
 	"devDependencies": {
-		"@nativescript/android": "~9.1.1",
-		"@nativescript/ios": "~8.9.0"
+		"@nativescript/android": "9.1.2-next.2026-11-08-42523049386",
+		"@nativescript/ios": "9.1.0-next.2026-11-06-42297474182"
 	}
 }

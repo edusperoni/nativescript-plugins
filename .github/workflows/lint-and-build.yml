@@ -1,4 +1,4 @@
-name: Lint and Build (PR)
+name: Lint, Build and Test (PR)
 
 env:
   NX_BRANCH: ${{ github.event.number || github.ref_name }}
@@ -10,10 +10,17 @@ on:
   pull_request:
     branches: [ "main" ]
 
+# A new push to a PR cancels its in-flight run; pushes to main always run to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     name: Lint affected projects
     runs-on: ubuntu-latest
+    outputs:
+      demo-affected: ${{ steps.affected.outputs.demo }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -30,6 +37,15 @@ jobs:
         run: yarn
       - name: Lint affected
         run: yarn nx affected:lint
+      # The device tests live in the demo app, which depends on every package.
+      - name: Check whether the demo app is affected
+        id: affected
+        run: |
+          if yarn -s nx show projects --affected --projects=demo | grep -qx demo; then
+            echo "demo=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "demo=false" >> "$GITHUB_OUTPUT"
+          fi
   build:
     name: Build affected projects
     needs: lint
@@ -53,3 +69,159 @@ jobs:
         run: yarn
       - name: Build.all affected
         run: yarn nx affected --target=build.all
+
+  test-android:
+    name: Test (Android emulator)
+    needs: lint
+    if: needs.lint.outputs.demo-affected == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: yarn
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+      # The demo app's dependencies are installed by the NativeScript CLI with npm.
+      - name: Cache npm (demo app)
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: npm-demo-${{ runner.os }}-${{ hashFiles('apps/demo/package.json') }}
+          restore-keys: npm-demo-${{ runner.os }}-
+      # nscsqlite holds the archives the sqlite plugin downloads (see its downloads.properties).
+      - name: Cache Gradle
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.gradle/nscsqlite
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/demo/package.json', 'tools/assets/App_Resources/Android/**/*.gradle', 'packages/*/platforms/android/**/*.gradle', 'packages/*/platforms/android/**/downloads.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Cache AVD snapshot
+        id: avd-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-${{ runner.os }}-34-x86_64-google_apis
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: false
+          disable-animations: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: echo "AVD snapshot created"
+      - name: yarn install
+        run: yarn
+      - name: Disable NativeScript CLI reporting
+        run: |
+          yarn ns usage-reporting disable
+          yarn ns error-reporting disable
+      # If the app crashes on launch, karma never sees a browser and waits forever.
+      - name: Run tests
+        timeout-minutes: 30
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: false
+          disable-animations: true
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: yarn nx run demo:test:android --device=emulator-5554 --silent
+
+  test-ios:
+    name: Test (iOS simulator)
+    needs: lint
+    if: needs.lint.outputs.demo-affected == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    # Non-blocking until the networking warm-up below has proven reliable.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: yarn
+      - name: Cache npm (demo app)
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: npm-demo-${{ runner.os }}-${{ hashFiles('apps/demo/package.json') }}
+          restore-keys: npm-demo-${{ runner.os }}-
+      - name: yarn install
+        run: yarn
+      - name: Disable NativeScript CLI reporting
+        run: |
+          yarn ns usage-reporting disable
+          yarn ns error-reporting disable
+      - name: Boot an iPhone simulator
+        id: simulator
+        run: |
+          # Newest installed iOS runtime, first iPhone on it
+          udid=$(xcrun simctl list devices available -j | jq -r '
+            .devices | to_entries
+            | map(select(.key | contains(".iOS-")))
+            | sort_by(.key | [scan("[0-9]+") | tonumber])
+            | last | .value
+            | map(select(.name | startswith("iPhone")))
+            | first | .udid')
+          [ -n "$udid" ] && [ "$udid" != "null" ] || { xcrun simctl list devices available; exit 1; }
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+      # On GitHub's macOS runners the simulator's first connection to each host address stalls for
+      # ~20s, while the test runner tries each address once with a 3s timeout. One connection from
+      # Safari beforehand makes later connections to that address (any port, any app) immediate.
+      - name: Warm up simulator-to-host networking
+        env:
+          SIMULATOR: ${{ steps.simulator.outputs.udid }}
+        run: |
+          log="$RUNNER_TEMP/warmup.log"
+          node -e "require('http').createServer((q,s)=>{console.log(q.url);s.end('ok')}).listen(9999,'0.0.0.0')" > "$log" 2>&1 &
+          server=$!
+          for _ in $(seq 1 20); do nc -z 127.0.0.1 9999 && break; sleep 0.5; done
+          # The test runner is handed every IPv4 address of the host.
+          ips=$(ifconfig | awk '/inet / {print $2}')
+          # openurl itself can time out while Safari launches for the first time, so keep
+          # re-opening each URL until its request reaches the server.
+          deadline=$((SECONDS + 180))
+          for ip in $ips; do
+            last_open=-100
+            until grep -qx "/$ip" "$log"; do
+              [ "$SECONDS" -lt "$deadline" ] || { echo "::warning::simulator never reached $ip"; break; }
+              if [ $((SECONDS - last_open)) -ge 15 ]; then
+                xcrun simctl openurl "$SIMULATOR" "http://$ip:9999/$ip" || echo "openurl $ip failed, retrying"
+                last_open=$SECONDS
+              fi
+              sleep 1
+            done
+          done
+          echo "Warm-up finished after ${SECONDS}s; requests received:"
+          cat "$log"
+          xcrun simctl terminate "$SIMULATOR" com.apple.mobilesafari || true
+          kill "$server"
+      - name: Run tests
+        timeout-minutes: 15
+        env:
+          SIMULATOR: ${{ steps.simulator.outputs.udid }}
+        run: yarn nx run demo:test:ios --device="$SIMULATOR" --silent
