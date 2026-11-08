@@ -7,6 +7,7 @@
 #include <atomic>
 #include <thread>
 #include <cstring>
+#include <cmath>
 
 // MARK: - Open Failure
 
@@ -300,6 +301,28 @@ private:
 
 // MARK: - Parameter Binding
 
+// The runtime hands every JS number over as a double. An integral one in the
+// safe-integer range is bound as INTEGER, as on Android: bound as REAL, it would be
+// stored as '1.0' in a TEXT-affinity column and no longer equal a stored '1'.
+// -0 stays REAL so its sign survives.
+static void bindNumber(sqlite3_stmt *stmt, int idx, NSNumber *num) {
+    const char *type = [num objCType];
+    if (strcmp(type, @encode(BOOL)) == 0 || strcmp(type, @encode(char)) == 0) {
+        sqlite3_bind_int(stmt, idx, [num intValue]);
+    } else if (strcmp(type, @encode(int)) == 0 || strcmp(type, @encode(long)) == 0 ||
+               strcmp(type, @encode(long long)) == 0 || strcmp(type, @encode(short)) == 0) {
+        sqlite3_bind_int64(stmt, idx, [num longLongValue]);
+    } else {
+        double value = [num doubleValue];
+        if (std::isfinite(value) && std::trunc(value) == value && std::fabs(value) <= 9007199254740991.0 &&
+            !(value == 0.0 && std::signbit(value))) {
+            sqlite3_bind_int64(stmt, idx, (sqlite3_int64)value);
+        } else {
+            sqlite3_bind_double(stmt, idx, value);
+        }
+    }
+}
+
 static bool bindParams(sqlite3_stmt *stmt, NSArray *params, std::string &outError) {
     if (!params || params.count == 0) return true;
 
@@ -321,16 +344,7 @@ static bool bindParams(sqlite3_stmt *stmt, NSArray *params, std::string &outErro
             if ([value isKindOfClass:[NSNull class]] || value == nil) {
                 sqlite3_bind_null(stmt, idx);
             } else if ([value isKindOfClass:[NSNumber class]]) {
-                NSNumber *num = (NSNumber *)value;
-                const char *type = [num objCType];
-                if (strcmp(type, @encode(BOOL)) == 0 || strcmp(type, @encode(char)) == 0) {
-                    sqlite3_bind_int(stmt, idx, [num intValue]);
-                } else if (strcmp(type, @encode(int)) == 0 || strcmp(type, @encode(long)) == 0 ||
-                           strcmp(type, @encode(long long)) == 0 || strcmp(type, @encode(short)) == 0) {
-                    sqlite3_bind_int64(stmt, idx, [num longLongValue]);
-                } else {
-                    sqlite3_bind_double(stmt, idx, [num doubleValue]);
-                }
+                bindNumber(stmt, idx, (NSNumber *)value);
             } else if ([value isKindOfClass:[NSString class]]) {
                 const char *utf8 = [(NSString *)value UTF8String];
                 sqlite3_bind_text(stmt, idx, utf8, -1, SQLITE_TRANSIENT);
@@ -348,16 +362,7 @@ static bool bindParams(sqlite3_stmt *stmt, NSArray *params, std::string &outErro
         if ([value isKindOfClass:[NSNull class]] || value == nil) {
             sqlite3_bind_null(stmt, idx);
         } else if ([value isKindOfClass:[NSNumber class]]) {
-            NSNumber *num = (NSNumber *)value;
-            const char *type = [num objCType];
-            if (strcmp(type, @encode(BOOL)) == 0 || strcmp(type, @encode(char)) == 0) {
-                sqlite3_bind_int(stmt, idx, [num intValue]);
-            } else if (strcmp(type, @encode(int)) == 0 || strcmp(type, @encode(long)) == 0 ||
-                       strcmp(type, @encode(long long)) == 0 || strcmp(type, @encode(short)) == 0) {
-                sqlite3_bind_int64(stmt, idx, [num longLongValue]);
-            } else {
-                sqlite3_bind_double(stmt, idx, [num doubleValue]);
-            }
+            bindNumber(stmt, idx, (NSNumber *)value);
         } else if ([value isKindOfClass:[NSString class]]) {
             const char *utf8 = [(NSString *)value UTF8String];
             sqlite3_bind_text(stmt, idx, utf8, -1, SQLITE_TRANSIENT);

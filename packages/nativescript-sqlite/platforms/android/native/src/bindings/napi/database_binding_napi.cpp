@@ -313,7 +313,7 @@ namespace NSCSQLite
         }
 
         // Discriminating order mirrors the column types SQLite can bind: Number
-        // (integral and int32-representable → Integer, otherwise Float), String,
+        // (Integer or Float, see SetNumberParam), String,
         // Boolean, ArrayBuffer, everything else Null.
         static BoundParam ParseSingleParam(napi_env env, napi_value item)
         {
@@ -331,17 +331,7 @@ namespace NSCSQLite
             {
                 double number = 0.0;
                 napi_get_value_double(env, item, &number);
-                int32_t asInt = 0;
-                if (NapiHelpers::IsInt32Value(number, &asInt))
-                {
-                    p.type = ColumnType::Integer;
-                    p.intValue = asInt;
-                }
-                else
-                {
-                    p.type = ColumnType::Float;
-                    p.doubleValue = number;
-                }
+                SetNumberParam(p, number);
                 return p;
             }
             case napi_string:
