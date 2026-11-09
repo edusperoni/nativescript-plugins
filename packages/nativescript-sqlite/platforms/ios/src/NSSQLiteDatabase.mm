@@ -299,6 +299,16 @@ private:
     }
 };
 
+@implementation NSSQLiteInt64
+
++ (instancetype)int64WithString:(NSString *)decimal {
+    NSSQLiteInt64 *result = [[NSSQLiteInt64 alloc] init];
+    result->_value = strtoll([decimal UTF8String], nullptr, 10);
+    return result;
+}
+
+@end
+
 // MARK: - Parameter Binding
 
 // The runtime hands every JS number over as a double. An integral one in the
@@ -323,12 +333,28 @@ static void bindNumber(sqlite3_stmt *stmt, int idx, NSNumber *num) {
     }
 }
 
+// JavaScript has already rejected any value it cannot bind, so anything else
+// cannot arrive here.
+static void bindValue(sqlite3_stmt *stmt, int idx, id value) {
+    if ([value isKindOfClass:[NSNull class]] || value == nil) {
+        sqlite3_bind_null(stmt, idx);
+    } else if ([value isKindOfClass:[NSNumber class]]) {
+        bindNumber(stmt, idx, (NSNumber *)value);
+    } else if ([value isKindOfClass:[NSSQLiteInt64 class]]) {
+        sqlite3_bind_int64(stmt, idx, ((NSSQLiteInt64 *)value).value);
+    } else if ([value isKindOfClass:[NSString class]]) {
+        const char *utf8 = [(NSString *)value UTF8String];
+        sqlite3_bind_text(stmt, idx, utf8, -1, SQLITE_TRANSIENT);
+    } else if ([value isKindOfClass:[NSData class]]) {
+        NSData *data = (NSData *)value;
+        sqlite3_bind_blob(stmt, idx, data.bytes, (int)data.length, SQLITE_TRANSIENT);
+    }
+}
+
 static bool bindParams(sqlite3_stmt *stmt, NSArray *params, std::string &outError) {
     if (!params || params.count == 0) return true;
 
     id first = params[0];
-    bool isDict = [first isKindOfClass:[NSString class]] && params.count == 2 && [params[1] isKindOfClass:[NSDictionary class]];
-
     if ([first isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = (NSDictionary *)first;
         for (NSString *key in dict) {
@@ -340,36 +366,13 @@ static bool bindParams(sqlite3_stmt *stmt, NSArray *params, std::string &outErro
                 outError = std::string("Unknown parameter: ") + [paramName UTF8String];
                 return false;
             }
-            id value = dict[key];
-            if ([value isKindOfClass:[NSNull class]] || value == nil) {
-                sqlite3_bind_null(stmt, idx);
-            } else if ([value isKindOfClass:[NSNumber class]]) {
-                bindNumber(stmt, idx, (NSNumber *)value);
-            } else if ([value isKindOfClass:[NSString class]]) {
-                const char *utf8 = [(NSString *)value UTF8String];
-                sqlite3_bind_text(stmt, idx, utf8, -1, SQLITE_TRANSIENT);
-            } else if ([value isKindOfClass:[NSData class]]) {
-                NSData *data = (NSData *)value;
-                sqlite3_bind_blob(stmt, idx, data.bytes, (int)data.length, SQLITE_TRANSIENT);
-            }
+            bindValue(stmt, idx, dict[key]);
         }
         return true;
     }
 
     for (NSUInteger i = 0; i < params.count; i++) {
-        int idx = (int)(i + 1);
-        id value = params[i];
-        if ([value isKindOfClass:[NSNull class]] || value == nil) {
-            sqlite3_bind_null(stmt, idx);
-        } else if ([value isKindOfClass:[NSNumber class]]) {
-            bindNumber(stmt, idx, (NSNumber *)value);
-        } else if ([value isKindOfClass:[NSString class]]) {
-            const char *utf8 = [(NSString *)value UTF8String];
-            sqlite3_bind_text(stmt, idx, utf8, -1, SQLITE_TRANSIENT);
-        } else if ([value isKindOfClass:[NSData class]]) {
-            NSData *data = (NSData *)value;
-            sqlite3_bind_blob(stmt, idx, data.bytes, (int)data.length, SQLITE_TRANSIENT);
-        }
+        bindValue(stmt, (int)(i + 1), params[i]);
     }
     return true;
 }

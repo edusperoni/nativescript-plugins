@@ -5,6 +5,10 @@ export { DatabaseOptions, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRo
 export type { PreparedStatement, ReadTransaction, SQLiteDatabase, Transaction };
 export * from './common';
 
+declare class NSSQLiteInt64 extends NSObject {
+	static int64WithString(decimal: string): NSSQLiteInt64;
+}
+
 declare class NSSQLiteDatabase extends NSObject {
 	/** Returns null with `error` set when the writer cannot be opened, unless asyncOpen is true. */
 	static openWithPathPoolSizeReadOnlyBusyTimeoutEncryptionKeyOpenSequenceSerializedAsyncOpenError(path: string, poolSize: number, readOnly: boolean, busyTimeout: number, encryptionKey: string | null, openSequence: NativeOpenStep[], serialized: boolean, asyncOpen: boolean, error: interop.Reference<NSError>): NSSQLiteDatabase;
@@ -99,6 +103,10 @@ function marshalValue(v: unknown, describe: () => string): any {
 	if (typeof v === 'boolean') return NSNumber.numberWithBool(v);
 	if (typeof v === 'number') return NSNumber.numberWithDouble(v);
 	if (typeof v === 'string') return v;
+	if (typeof v === 'bigint') {
+		if (BigInt.asIntN(64, v) !== v) throw new RangeError(`Cannot bind parameter ${describe()}: bigint is outside the 64-bit integer range`);
+		return NSSQLiteInt64.int64WithString(v.toString());
+	}
 	// The runtime marshals a view as its own byteOffset..byteLength range.
 	if (isBinary(v)) return NSData.dataWithData(v as any);
 	throw new TypeError(`Cannot bind parameter ${describe()}: unsupported value of type ${typeof v}`);

@@ -195,3 +195,17 @@
 @property (nonatomic, readonly) BOOL isOpen;
 
 @end
+
+/**
+ * A 64-bit integer query parameter. JavaScript numbers reach native code as
+ * doubles, so a bigint outside the safe-integer range is passed in its decimal
+ * form instead and bound with sqlite3_bind_int64. The caller has already checked
+ * that it fits in 64 bits.
+ */
+@interface NSSQLiteInt64 : NSObject
+
++ (instancetype)int64WithString:(NSString *)decimal;
+
+@property (nonatomic, readonly) int64_t value;
+
+@end

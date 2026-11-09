@@ -260,8 +260,8 @@ n      INTEGER
 				expect(await count()).toBe(0);
 			});
 
-			it('rejects a bigint bound in a select, naming its index', async () => {
-				await expectAsync(db.select(`SELECT ?`, [untyped(BigInt(1))])).toBeRejectedWithError(TypeError, /index 0/);
+			it('rejects a symbol bound in a select, naming its index', async () => {
+				await expectAsync(db.select(`SELECT ?`, [untyped(Symbol('s'))])).toBeRejectedWithError(TypeError, /index 0/);
 				expect(await count()).toBe(0);
 			});
 
@@ -279,6 +279,78 @@ n      INTEGER
 				}
 				expect(await count()).toBe(0);
 			});
+		});
+	});
+
+	describe('bigint parameters', () => {
+		let db: SQLiteDatabase;
+
+		// Read back as text: a JavaScript number cannot hold a 64-bit integer exactly.
+		const stored = async (id: number) => db.get<{ t: string; v: string }>(`SELECT typeof(v) AS t, CAST(v AS TEXT) AS v FROM ints WHERE id = ?`, [id]);
+		const count = async () => (await db.get<{ n: number }>(`SELECT count(*) AS n FROM ints`))?.n;
+
+		beforeEach(async () => {
+			db = open('bigint_params');
+			// No declared type, so the column keeps whatever storage class was bound.
+			await db.execute(`CREATE TABLE ints (id INTEGER PRIMARY KEY, v)`);
+		});
+
+		it('binds a small bigint as INTEGER', async () => {
+			await db.execute(`INSERT INTO ints VALUES (?, ?)`, [1, BigInt(5)]);
+			expect(await stored(1)).toEqual({ t: 'integer', v: '5' });
+		});
+
+		it('binds a bigint beyond Number.MAX_SAFE_INTEGER exactly', async () => {
+			await db.execute(`INSERT INTO ints VALUES (?, ?)`, [2, BigInt('9007199254740993')]);
+			expect(await stored(2)).toEqual({ t: 'integer', v: '9007199254740993' });
+		});
+
+		it('binds the signed 64-bit limits exactly', async () => {
+			await db.execute(`INSERT INTO ints VALUES (?, ?)`, [3, BigInt('9223372036854775807')]);
+			await db.execute(`INSERT INTO ints VALUES (?, ?)`, [4, BigInt('-9223372036854775808')]);
+			expect(await stored(3)).toEqual({ t: 'integer', v: '9223372036854775807' });
+			expect(await stored(4)).toEqual({ t: 'integer', v: '-9223372036854775808' });
+		});
+
+		it('binds a named bigint', async () => {
+			await db.execute(`INSERT INTO ints VALUES (:id, :v)`, { id: 5, v: BigInt(-42) });
+			expect(await stored(5)).toEqual({ t: 'integer', v: '-42' });
+		});
+
+		it('matches a bigint parameter in a WHERE clause', async () => {
+			await db.execute(`INSERT INTO ints VALUES (6, 9007199254740993)`);
+			const found = await db.select<{ id: number }>(`SELECT id FROM ints WHERE v = ?`, [BigInt('9007199254740993')]);
+			expect(found).toEqual([{ id: 6 }]);
+		});
+
+		it('binds a bigint through executeSync', async () => {
+			db.executeSync(`INSERT INTO ints VALUES (?, ?)`, [7, BigInt('-9007199254740993')]);
+			expect(await stored(7)).toEqual({ t: 'integer', v: '-9007199254740993' });
+		});
+
+		it('binds a bigint through a prepared statement', async () => {
+			const stmt = await db.prepare(`INSERT INTO ints VALUES (?, ?)`);
+			try {
+				await stmt.execute([8, BigInt('9223372036854775807')]);
+			} finally {
+				await stmt.finalize();
+			}
+			expect(await stored(8)).toEqual({ t: 'integer', v: '9223372036854775807' });
+		});
+
+		it('rejects a bigint above the 64-bit range with a RangeError naming its index', async () => {
+			await expectAsync(db.execute(`INSERT INTO ints VALUES (?, ?)`, [9, BigInt('9223372036854775808')])).toBeRejectedWithError(RangeError, /index 1/);
+			expect(await count()).toBe(0);
+		});
+
+		it('rejects a bigint below the 64-bit range with a RangeError naming the parameter', async () => {
+			await expectAsync(db.execute(`INSERT INTO ints VALUES (:id, :v)`, { id: 9, v: BigInt('-9223372036854775809') })).toBeRejectedWithError(RangeError, /"v"/);
+			expect(await count()).toBe(0);
+		});
+
+		it('throws a RangeError from executeSync for a bigint out of range', async () => {
+			expect(() => db.executeSync(`INSERT INTO ints VALUES (?, ?)`, [9, BigInt('18446744073709551616')])).toThrowError(RangeError, /index 1/);
+			expect(await count()).toBe(0);
 		});
 	});
 

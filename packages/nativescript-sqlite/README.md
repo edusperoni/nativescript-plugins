@@ -415,6 +415,7 @@ The prefix (`:`, `$`, `@`) is added automatically if omitted — you can pass `{
 | --------------------------------------------------------------- | ------------------------------------------------------- |
 | `string`                                                        | TEXT                                                    |
 | `number`                                                        | INTEGER if whole and within ±(2^53 − 1), otherwise REAL |
+| `bigint`                                                        | INTEGER (64-bit); `RangeError` if it does not fit       |
 | `boolean`                                                       | INTEGER (0 or 1)                                        |
 | `null`, `undefined`                                             | NULL                                                    |
 | `ArrayBuffer`, `SharedArrayBuffer`                              | BLOB                                                    |
@@ -422,7 +423,9 @@ The prefix (`:`, `$`, `@`) is added automatically if omitted — you can pass `{
 
 A view binds only the bytes it covers (`byteOffset` to `byteOffset + byteLength`), not its whole underlying buffer.
 
-Any other value (a `Date`, a plain object, a `bigint`, a function, …) throws a `TypeError` naming the parameter, e.g. `Cannot bind parameter at index 1: unsupported value of type object` or `Cannot bind parameter "createdAt": unsupported value of type object`. Async methods reject with it; sync methods throw it. Convert such values yourself first, e.g. `date.toISOString()` or `date.getTime()`.
+A `bigint` binds exactly, including values beyond `Number.MAX_SAFE_INTEGER`; one outside the signed 64-bit range throws a `RangeError` naming the parameter. Results still come back as JavaScript numbers, so an INTEGER beyond `Number.MAX_SAFE_INTEGER` loses precision when read; select `CAST(col AS TEXT)` to read it exactly.
+
+Any other value (a `Date`, a plain object, a function, …) throws a `TypeError` naming the parameter, e.g. `Cannot bind parameter at index 1: unsupported value of type object` or `Cannot bind parameter "createdAt": unsupported value of type object`. Async methods reject with it; sync methods throw it. Convert such values yourself first, e.g. `date.toISOString()` or `date.getTime()`.
 
 ### Transactions
 
@@ -1128,7 +1131,7 @@ It is only the *absent codec* that is silent, and only on an engine the plugin d
 
 ```typescript
 type SQLiteValue = string | number | boolean | null | ArrayBuffer;
-type SQLiteBindValue = string | number | boolean | null | undefined | ArrayBufferLike | ArrayBufferView;
+type SQLiteBindValue = string | number | bigint | boolean | null | undefined | ArrayBufferLike | ArrayBufferView;
 type SQLiteParams = SQLiteBindValue[] | Record<string, SQLiteBindValue>;
 type SQLiteRow = Record<string, SQLiteValue>;
 
