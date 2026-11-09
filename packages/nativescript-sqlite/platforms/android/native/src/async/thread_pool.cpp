@@ -152,7 +152,7 @@ void ThreadPool::workerThread() {
             busy_ = true;
         }
 
-        task(); // MUST NOT touch V8
+        task(); // MUST NOT touch Node-API
 
         bool wake, wakeAll;
         {

@@ -51,24 +51,14 @@ export {
 	SQLITE_NULL,
 } from './common';
 
-declare const global: any;
 declare const __non_webpack_require__: (name: string) => any;
 
-// Load native library.
-// The V8 backend's JNI_OnLoad calls DatabaseBinding::Init via
-// v8::Isolate::GetCurrent(), so global.NSCSQLite is ready as soon as
-// loadLibrary returns.  The napi backend instead registers a Node-API module
-// from a static constructor, which only the runtime's own require() resolves —
-// webpack rewrites a plain `require`, so it has to be reached through
-// __non_webpack_require__.
+// Loading the library registers a Node-API module from a static constructor,
+// which only the runtime's own require() resolves — webpack rewrites a plain
+// `require`, so it has to be reached through __non_webpack_require__.
 java.lang.System.loadLibrary('nscsqlite');
 
-function loadNativeClass(): any {
-	if (global.NSCSQLite) return global.NSCSQLite;
-	return __non_webpack_require__('nscsqlite').NSCSQLite;
-}
-
-const NSCSQLite = loadNativeClass();
+const NSCSQLite = __non_webpack_require__('nscsqlite').NSCSQLite;
 
 interface NativeOpenOptions {
 	readOnly: boolean;

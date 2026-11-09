@@ -2,7 +2,7 @@
 
 // ---------------------------------------------------------------------------
 // SQLiteConnection — Layer 3: Pure SQLite execution.
-// NO V8, NO JNI, NO Android-specific code except sqlite3.h.
+// NO Node-API, NO JNI, NO Android-specific code except sqlite3.h.
 //
 // A connection is used by one thread at a time: its dispatcher's worker, plus —
 // for the writer — the JS thread, which takes the same claim on that dispatcher
@@ -103,8 +103,8 @@ public:
 
     // ── JSON fast-path (async API) ───────────────────────────────────────────
     // These build result.jsonRows + result.jsonBlobs on the worker thread so
-    // the JS thread only needs one v8::JSON::Parse() call instead of
-    // O(rowsXcolumns) individual V8 Set() calls.
+    // the JS thread only needs one JSON.parse() call instead of
+    // O(rowsXcolumns) individual property sets.
     QueryResult executeJson(const std::string& sql, const ParamList& params = {});
     QueryResult executeGetJson(const std::string& sql, const ParamList& params = {});
     QueryResult executeArrayJson(const std::string& sql, const ParamList& params = {});
