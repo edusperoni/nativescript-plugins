@@ -94,6 +94,8 @@ function distTagFor(version) {
 	const results = await releasePublish({ projects: [project], dryRun, verbose, tag });
 	const failed = Object.entries(results).filter(([, r]) => r.code !== 0);
 	if (failed.length) fail(`publish failed for ${failed.map(([p]) => p).join(', ')}`);
+	// nx's programmatic API can leave handles open (e.g. Nx Cloud connections) that keep node running.
+	process.exit(0);
 })().catch((err) => {
 	console.error(err);
 	process.exit(1);

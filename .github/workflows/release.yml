@@ -87,6 +87,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_CONFIG_PROVENANCE: 'true'
+          # Build from source only: PR runs write to the Nx Cloud cache, so a cache hit here could publish their output.
+          NX_NO_CLOUD: 'true'
+          NX_SKIP_NX_CACHE: 'true'
           PROJECT: ${{ inputs.project }}
           SPECIFIER: ${{ inputs.version || inputs.bump }}
           PREID: ${{ inputs.preid }}
