@@ -90,36 +90,31 @@ function runSelectArraySync<T extends SQLiteValue[]>(call: SyncSelectCall): SQLi
 	return parseArrayResult<T>(json, blobs.value ?? null);
 }
 
+function isBinary(v: unknown): v is ArrayBufferLike | ArrayBufferView {
+	return v instanceof ArrayBuffer || ArrayBuffer.isView(v) || v instanceof SharedArrayBuffer;
+}
+
+function marshalValue(v: unknown, describe: () => string): any {
+	if (v === null || v === undefined) return NSNull.null();
+	if (typeof v === 'boolean') return NSNumber.numberWithBool(v);
+	if (typeof v === 'number') return NSNumber.numberWithDouble(v);
+	if (typeof v === 'string') return v;
+	// The runtime marshals a view as its own byteOffset..byteLength range.
+	if (isBinary(v)) return NSData.dataWithData(v as any);
+	throw new TypeError(`Cannot bind parameter ${describe()}: unsupported value of type ${typeof v}`);
+}
+
 function marshalParams(params?: SQLiteParams): NSArray<any> {
 	if (!params) return NSArray.new<any>();
 	if (Array.isArray(params)) {
-		return NSArray.arrayWithArray(
-			params.map((v) => {
-				if (v === null || v === undefined) return NSNull.null();
-				if (typeof v === 'boolean') return NSNumber.numberWithBool(v);
-				if (typeof v === 'number') return NSNumber.numberWithDouble(v);
-				if (typeof v === 'string') return v as any;
-				if (v instanceof ArrayBuffer) return NSData.dataWithData(v as any);
-				return NSNull.null();
-			}),
-		);
+		return NSArray.arrayWithArray(params.map((v, i) => marshalValue(v, () => `at index ${i}`)));
 	}
 	const dict = NSMutableDictionary.new<string, any>();
 	for (const key of Object.keys(params)) {
-		const v = (params as Record<string, SQLiteValue>)[key];
-		if (v === null || v === undefined) {
-			dict.setObjectForKey(NSNull.null(), key);
-		} else if (typeof v === 'boolean') {
-			dict.setObjectForKey(NSNumber.numberWithBool(v), key);
-		} else if (typeof v === 'number') {
-			dict.setObjectForKey(NSNumber.numberWithDouble(v), key);
-		} else if (typeof v === 'string') {
-			dict.setObjectForKey(v as any, key);
-		} else if (v instanceof ArrayBuffer) {
-			dict.setObjectForKey(NSData.dataWithData(v as any), key);
-		} else {
-			dict.setObjectForKey(NSNull.null(), key);
-		}
+		dict.setObjectForKey(
+			marshalValue(params[key], () => `"${key}"`),
+			key,
+		);
 	}
 	return NSArray.arrayWithObject(dict);
 }

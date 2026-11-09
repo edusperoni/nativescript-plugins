@@ -411,13 +411,18 @@ The prefix (`:`, `$`, `@`) is added automatically if omitted — you can pass `{
 
 **Supported value types:**
 
-| JS Type         | SQLite Type                     |
-| --------------- | ------------------------------- |
-| `string`      | TEXT                            |
-| `number`      | INTEGER if whole and within ±(2^53 − 1), otherwise REAL |
-| `boolean`     | INTEGER (0 or 1)                |
-| `null`        | NULL                            |
-| `ArrayBuffer` | BLOB                            |
+| JS Type                                                         | SQLite Type                                             |
+| --------------------------------------------------------------- | ------------------------------------------------------- |
+| `string`                                                        | TEXT                                                    |
+| `number`                                                        | INTEGER if whole and within ±(2^53 − 1), otherwise REAL |
+| `boolean`                                                       | INTEGER (0 or 1)                                        |
+| `null`, `undefined`                                             | NULL                                                    |
+| `ArrayBuffer`, `SharedArrayBuffer`                              | BLOB                                                    |
+| `ArrayBufferView` (`Uint8Array` or any typed array, `DataView`) | BLOB of the view's bytes only                           |
+
+A view binds only the bytes it covers (`byteOffset` to `byteOffset + byteLength`), not its whole underlying buffer.
+
+Any other value (a `Date`, a plain object, a `bigint`, a function, …) throws a `TypeError` naming the parameter, e.g. `Cannot bind parameter at index 1: unsupported value of type object` or `Cannot bind parameter "createdAt": unsupported value of type object`. Async methods reject with it; sync methods throw it. Convert such values yourself first, e.g. `date.toISOString()` or `date.getTime()`.
 
 ### Transactions
 
@@ -1067,7 +1072,7 @@ async function encryptionWorks(): Promise<boolean> {
 }
 ```
 
-This is what the plugin's own demo test suite uses to decide whether to run its encryption tests (`tools/demo/nativescript-sqlite/test-suite/index.ts`). Note the cost: it performs a keyed open, which on a passphrase is not free — see [The cost of a passphrase](#the-cost-of-a-passphrase). Run it once, at first launch or in a debug build, and cache the answer; do not run it on every start.
+This is what the plugin's own test specs use to decide whether to run their encryption tests (`hasSQLCipher()` in `apps/demo/src/tests/sqlite/helpers.ts`). Note the cost: it performs a keyed open, which on a passphrase is not free — see [The cost of a passphrase](#the-cost-of-a-passphrase). Run it once, at first launch or in a debug build, and cache the answer; do not run it on every start.
 
 ### The engine-specific assertion
 
@@ -1123,7 +1128,8 @@ It is only the *absent codec* that is silent, and only on an engine the plugin d
 
 ```typescript
 type SQLiteValue = string | number | boolean | null | ArrayBuffer;
-type SQLiteParams = SQLiteValue[] | Record<string, SQLiteValue>;
+type SQLiteBindValue = string | number | boolean | null | undefined | ArrayBufferLike | ArrayBufferView;
+type SQLiteParams = SQLiteBindValue[] | Record<string, SQLiteBindValue>;
 type SQLiteRow = Record<string, SQLiteValue>;
 
 interface SQLiteArrayResult<T extends SQLiteValue[] = SQLiteValue[]> {

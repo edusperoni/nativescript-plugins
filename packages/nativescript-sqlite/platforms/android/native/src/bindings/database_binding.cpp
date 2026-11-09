@@ -254,11 +254,12 @@ namespace NSCSQLite
             return nullptr;
         }
 
-        static BoundParam ParseSingleParam(v8::Isolate *isolate,
-                                           v8::Local<v8::Context> ctx,
-                                           v8::Local<v8::Value> item)
+        // Returns false for a value SQLite cannot bind; null and undefined bind as NULL.
+        static bool ParseSingleParam(v8::Isolate *isolate,
+                                     v8::Local<v8::Context> ctx,
+                                     v8::Local<v8::Value> item,
+                                     BoundParam &p)
         {
-            BoundParam p;
             if (item->IsNumber())
             {
                 SetNumberParam(p, item->NumberValue(ctx).ToChecked());
@@ -268,30 +269,58 @@ namespace NSCSQLite
                 p.type = ColumnType::Text;
                 p.textValue = V8Helpers::FromV8String(isolate, item);
             }
-            else if (item->IsArrayBuffer())
-            {
-                p.type = ColumnType::Blob;
-                p.blobValue = V8Helpers::FromV8ArrayBuffer(isolate, item.As<v8::ArrayBuffer>());
-            }
             else if (item->IsBoolean())
             {
                 p.type = ColumnType::Integer;
                 p.intValue = item->BooleanValue(isolate) ? 1 : 0;
             }
-            else
+            else if (item->IsNullOrUndefined())
             {
                 p.type = ColumnType::Null;
             }
-            return p;
+            else if (item->IsArrayBuffer())
+            {
+                p.type = ColumnType::Blob;
+                p.blobValue = V8Helpers::FromV8ArrayBuffer(isolate, item.As<v8::ArrayBuffer>());
+            }
+            else if (item->IsSharedArrayBuffer())
+            {
+                p.type = ColumnType::Blob;
+                p.blobValue = V8Helpers::FromV8SharedArrayBuffer(item.As<v8::SharedArrayBuffer>());
+            }
+            else if (item->IsArrayBufferView())
+            {
+                p.type = ColumnType::Blob;
+                p.blobValue = V8Helpers::FromV8ArrayBufferView(item.As<v8::ArrayBufferView>());
+            }
+            else
+            {
+                return false;
+            }
+            return true;
+        }
+
+        // Rejects `resolver` when given, otherwise throws.
+        static void FailParam(v8::Isolate *isolate, v8::Local<v8::Promise::Resolver> resolver,
+                              const std::string &which, v8::Local<v8::Value> item)
+        {
+            std::string message = "Cannot bind parameter " + which + ": unsupported value of type " +
+                                  V8Helpers::FromV8String(isolate, item->TypeOf(isolate));
+            auto error = v8::Exception::TypeError(V8Helpers::ToV8String(isolate, message));
+            if (resolver.IsEmpty())
+                isolate->ThrowException(error);
+            else
+                resolver->Reject(isolate->GetCurrentContext(), error).IsJust();
         }
 
         // Accepts positional arrays or named-parameter objects.
-        // Object keys without a recognized prefix (:/$/@) get ':' prepended automatically,
-        static ParamList ParseParams(v8::Isolate *isolate, v8::Local<v8::Value> val)
+        // Object keys without a recognized prefix (:/$/@) get ':' prepended automatically.
+        // On an unsupported value, fails through FailParam and returns false.
+        static bool ParseParams(v8::Isolate *isolate, v8::Local<v8::Value> val, ParamList &result,
+                                v8::Local<v8::Promise::Resolver> resolver = {})
         {
-            ParamList result;
             if (val.IsEmpty() || val->IsNull() || val->IsUndefined())
-                return result;
+                return true;
 
             auto ctx = isolate->GetCurrentContext();
 
@@ -302,9 +331,16 @@ namespace NSCSQLite
                 result.reserve(len);
                 for (uint32_t i = 0; i < len; ++i)
                 {
-                    result.push_back(ParseSingleParam(isolate, ctx, arr->Get(ctx, i).ToLocalChecked()));
+                    auto item = arr->Get(ctx, i).ToLocalChecked();
+                    BoundParam p;
+                    if (!ParseSingleParam(isolate, ctx, item, p))
+                    {
+                        FailParam(isolate, resolver, "at index " + std::to_string(i), item);
+                        return false;
+                    }
+                    result.push_back(std::move(p));
                 }
-                return result;
+                return true;
             }
 
             if (val->IsObject())
@@ -318,18 +354,23 @@ namespace NSCSQLite
                     auto key = keys->Get(ctx, i).ToLocalChecked();
                     auto value = obj->Get(ctx, key).ToLocalChecked();
                     std::string name = V8Helpers::FromV8String(isolate, key);
+                    BoundParam p;
+                    if (!ParseSingleParam(isolate, ctx, value, p))
+                    {
+                        FailParam(isolate, resolver, "\"" + name + "\"", value);
+                        return false;
+                    }
                     if (name.empty() || (name[0] != ':' && name[0] != '$' && name[0] != '@'))
                     {
                         name = ':' + name;
                     }
-                    BoundParam p = ParseSingleParam(isolate, ctx, value);
                     p.paramName = std::move(name);
                     result.push_back(std::move(p));
                 }
-                return result;
+                return true;
             }
 
-            return result;
+            return true;
         }
 
         // V8 Callbacks
@@ -725,7 +766,9 @@ namespace NSCSQLite
             args.GetReturnValue().Set(resolver->GetPromise());
 
             std::string sql = V8Helpers::FromV8String(isolate, args[0]);
-            ParamList params = ParseParams(isolate, args[1]);
+            ParamList params;
+            if (!ParseParams(isolate, args[1], params, resolver))
+                return;
 
             SQLiteConnection *wdb = instance->writerDb.get();
             Dispatch(*instance->writerDispatcher, wdb, instance, isolate, resolver, [wdb, sql, params = std::move(params)]() -> QueryResult
@@ -744,7 +787,9 @@ namespace NSCSQLite
             args.GetReturnValue().Set(resolver->GetPromise());
 
             std::string sql = V8Helpers::FromV8String(isolate, args[0]);
-            ParamList params = ParseParams(isolate, args[1]);
+            ParamList params;
+            if (!ParseParams(isolate, args[1], params, resolver))
+                return;
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
@@ -764,7 +809,9 @@ namespace NSCSQLite
             args.GetReturnValue().Set(resolver->GetPromise());
 
             std::string sql = V8Helpers::FromV8String(isolate, args[0]);
-            ParamList params = ParseParams(isolate, args[1]);
+            ParamList params;
+            if (!ParseParams(isolate, args[1], params, resolver))
+                return;
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
@@ -784,7 +831,9 @@ namespace NSCSQLite
             args.GetReturnValue().Set(resolver->GetPromise());
 
             std::string sql = V8Helpers::FromV8String(isolate, args[0]);
-            ParamList params = ParseParams(isolate, args[1]);
+            ParamList params;
+            if (!ParseParams(isolate, args[1], params, resolver))
+                return;
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
@@ -804,7 +853,9 @@ namespace NSCSQLite
             args.GetReturnValue().Set(resolver->GetPromise());
 
             std::string sql = V8Helpers::FromV8String(isolate, args[0]);
-            ParamList params = ParseParams(isolate, args[1]);
+            ParamList params;
+            if (!ParseParams(isolate, args[1], params, resolver))
+                return;
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
@@ -828,7 +879,9 @@ namespace NSCSQLite
             bool joinTransaction = args.Length() > 2 && args[2]->IsBoolean() && args[2]->BooleanValue(isolate);
 
             std::string sql = V8Helpers::FromV8String(isolate, args[0]);
-            ParamList params = ParseParams(isolate, args[1]);
+            ParamList params;
+            if (!ParseParams(isolate, args[1], params))
+                return;
 
             // Read under the claim, not before it: a beginTransaction already
             // dispatched but not yet run would pass a check made out here, and
@@ -861,7 +914,9 @@ namespace NSCSQLite
 
             auto isolate = args.GetIsolate();
             std::string sql = V8Helpers::FromV8String(isolate, args[0]);
-            ParamList params = ParseParams(isolate, args[1]);
+            ParamList params;
+            if (!ParseParams(isolate, args[1], params))
+                return;
 
             QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
                                           { return db->execute(sql, params); });
@@ -882,7 +937,9 @@ namespace NSCSQLite
 
             auto isolate = args.GetIsolate();
             std::string sql = V8Helpers::FromV8String(isolate, args[0]);
-            ParamList params = ParseParams(isolate, args[1]);
+            ParamList params;
+            if (!ParseParams(isolate, args[1], params))
+                return;
 
             QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
                                           { return db->execute(sql, params); });
@@ -903,7 +960,9 @@ namespace NSCSQLite
 
             auto isolate = args.GetIsolate();
             std::string sql = V8Helpers::FromV8String(isolate, args[0]);
-            ParamList params = ParseParams(isolate, args[1]);
+            ParamList params;
+            if (!ParseParams(isolate, args[1], params))
+                return;
 
             QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
                                           { return db->executeGet(sql, params); });
@@ -924,7 +983,9 @@ namespace NSCSQLite
 
             auto isolate = args.GetIsolate();
             std::string sql = V8Helpers::FromV8String(isolate, args[0]);
-            ParamList params = ParseParams(isolate, args[1]);
+            ParamList params;
+            if (!ParseParams(isolate, args[1], params))
+                return;
 
             QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
                                           { return db->executeGet(sql, params); });
@@ -952,7 +1013,9 @@ namespace NSCSQLite
             auto isolate = args.GetIsolate();
             uint32_t txId = args[0]->Uint32Value(isolate->GetCurrentContext()).ToChecked();
             std::string sql = V8Helpers::FromV8String(isolate, args[1]);
-            ParamList params = ParseParams(isolate, args[2]);
+            ParamList params;
+            if (!ParseParams(isolate, args[2], params))
+                return;
 
             QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
                                           { return db->executeInTransaction(txId, sql, params); });
@@ -975,7 +1038,9 @@ namespace NSCSQLite
             auto ctx = isolate->GetCurrentContext();
             uint32_t txId = args[0]->Uint32Value(ctx).ToChecked();
             std::string sql = V8Helpers::FromV8String(isolate, args[1]);
-            ParamList params = ParseParams(isolate, args[2]);
+            ParamList params;
+            if (!ParseParams(isolate, args[2], params))
+                return;
 
             // Mode: 1=select, 2=selectArray — the async selectInTransaction's convention.
             int mode = args.Length() > 3 ? args[3]->Int32Value(ctx).ToChecked() : 1;
@@ -1135,7 +1200,9 @@ namespace NSCSQLite
             args.GetReturnValue().Set(resolver->GetPromise());
 
             uint32_t stmtId = args[0]->Uint32Value(isolate->GetCurrentContext()).ToChecked();
-            ParamList params = ParseParams(isolate, args[1]);
+            ParamList params;
+            if (!ParseParams(isolate, args[1], params, resolver))
+                return;
 
             // We need a mode argument: 0=execute, 1=select, 2=selectArray, 3=get, 4=getArray
             int mode = args.Length() > 2 ? args[2]->Int32Value(isolate->GetCurrentContext()).ToChecked() : 0;
@@ -1263,7 +1330,9 @@ namespace NSCSQLite
 
             uint32_t txId = args[0]->Uint32Value(isolate->GetCurrentContext()).ToChecked();
             std::string sql = V8Helpers::FromV8String(isolate, args[1]);
-            ParamList params = ParseParams(isolate, args[2]);
+            ParamList params;
+            if (!ParseParams(isolate, args[2], params, resolver))
+                return;
 
             SQLiteConnection *wdb = instance->writerDb.get();
             Dispatch(*instance->writerDispatcher, wdb, instance, isolate, resolver, [wdb, txId, sql, params = std::move(params)]() -> QueryResult
@@ -1283,7 +1352,9 @@ namespace NSCSQLite
 
             uint32_t txId = args[0]->Uint32Value(isolate->GetCurrentContext()).ToChecked();
             std::string sql = V8Helpers::FromV8String(isolate, args[1]);
-            ParamList params = ParseParams(isolate, args[2]);
+            ParamList params;
+            if (!ParseParams(isolate, args[2], params, resolver))
+                return;
 
             // Mode: 1=select, 2=selectArray
             int mode = args.Length() > 3 ? args[3]->Int32Value(isolate->GetCurrentContext()).ToChecked() : 1;

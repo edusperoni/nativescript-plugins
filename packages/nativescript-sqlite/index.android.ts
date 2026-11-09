@@ -1,6 +1,6 @@
-import { DatabaseOptions, ExecuteSyncOptions, NativeOpenStep, OpenStep, RuntimeInfo, SQLITE_ERROR, SQLITE_MISUSE, SQLiteArrayResult, SQLiteDatabase, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, SyncTransaction, Transaction, ReadTransaction, PreparedStatement, isInMemoryPath, resolveEncryptionKey, resolveOpenSequence } from './common';
+import { DatabaseOptions, ExecuteSyncOptions, NativeOpenStep, OpenStep, RuntimeInfo, SQLITE_ERROR, SQLITE_MISUSE, SQLiteArrayResult, SQLiteDatabase, SQLiteError, SQLiteBindValue, SQLiteParams, SQLiteRow, SQLiteValue, SyncTransaction, Transaction, ReadTransaction, PreparedStatement, isInMemoryPath, resolveEncryptionKey, resolveOpenSequence } from './common';
 
-export { DatabaseOptions, ExecuteSyncOptions, OpenStep, RuntimeInfo, SQLiteArrayResult, SQLiteError, SQLiteParams, SQLiteRow, SQLiteValue, ReadTransaction, SyncTransaction, Transaction, PreparedStatement, isInMemoryPath, resolveEncryptionKey, resolveOpenSequence };
+export { DatabaseOptions, ExecuteSyncOptions, OpenStep, RuntimeInfo, SQLiteArrayResult, SQLiteError, SQLiteBindValue, SQLiteParams, SQLiteRow, SQLiteValue, ReadTransaction, SyncTransaction, Transaction, PreparedStatement, isInMemoryPath, resolveEncryptionKey, resolveOpenSequence };
 export type { SQLiteDatabase };
 export {
 	SQLITE_OK,

@@ -312,18 +312,38 @@ namespace NSCSQLite
             return out;
         }
 
+        static const char *TypeName(napi_valuetype type)
+        {
+            switch (type)
+            {
+            case napi_undefined:
+                return "undefined";
+            case napi_boolean:
+                return "boolean";
+            case napi_number:
+                return "number";
+            case napi_string:
+                return "string";
+            case napi_symbol:
+                return "symbol";
+            case napi_function:
+                return "function";
+            case napi_bigint:
+                return "bigint";
+            default:
+                return "object";
+            }
+        }
+
         // Discriminating order mirrors the column types SQLite can bind: Number
         // (Integer or Float, see SetNumberParam), String,
-        // Boolean, ArrayBuffer, everything else Null.
-        static BoundParam ParseSingleParam(napi_env env, napi_value item)
+        // Boolean, null/undefined → Null, buffers and views → Blob.  Returns false
+        // for anything else, with `type` set for the error message.
+        static bool ParseSingleParam(napi_env env, napi_value item, BoundParam &p, napi_valuetype &type)
         {
-            BoundParam p;
-            napi_valuetype type = napi_undefined;
+            type = napi_undefined;
             if (napi_typeof(env, item, &type) != napi_ok)
-            {
-                p.type = ColumnType::Null;
-                return p;
-            }
+                return false;
 
             switch (type)
             {
@@ -332,49 +352,65 @@ namespace NSCSQLite
                 double number = 0.0;
                 napi_get_value_double(env, item, &number);
                 SetNumberParam(p, number);
-                return p;
+                return true;
             }
             case napi_string:
                 p.type = ColumnType::Text;
                 NapiHelpers::ToStdString(env, item, p.textValue);
-                return p;
+                return true;
             case napi_boolean:
             {
                 bool flag = false;
                 napi_get_value_bool(env, item, &flag);
                 p.type = ColumnType::Integer;
                 p.intValue = flag ? 1 : 0;
-                return p;
+                return true;
             }
+            case napi_null:
+            case napi_undefined:
+                p.type = ColumnType::Null;
+                return true;
             case napi_object:
-            {
-                bool isArrayBuffer = false;
-                if (napi_is_arraybuffer(env, item, &isArrayBuffer) == napi_ok && isArrayBuffer &&
-                    NapiHelpers::ArrayBufferTo(env, item, p.blobValue))
+                if (NapiHelpers::BinaryTo(env, item, p.blobValue))
                 {
                     p.type = ColumnType::Blob;
-                    return p;
+                    return true;
                 }
-                p.type = ColumnType::Null;
-                return p;
-            }
+                return false;
             default:
-                p.type = ColumnType::Null;
-                return p;
+                return false;
             }
         }
 
-        // Accepts positional arrays or named-parameter objects.
-        // Object keys without a recognized prefix (:/$/@) get ':' prepended automatically,
-        static ParamList ParseParams(napi_env env, napi_value value)
+        // A synchronous entry point (rejected null) throws; an asynchronous one
+        // gets a promise already rejected with the error.
+        static void FailParam(napi_env env, napi_value *rejected, const std::string &which, napi_valuetype type)
         {
-            ParamList result;
+            std::string message = "Cannot bind parameter " + which + ": unsupported value of type " + TypeName(type);
+            napi_value msg = NapiHelpers::String(env, message);
+            napi_value error = nullptr;
+            if (napi_create_type_error(env, nullptr, msg, &error) != napi_ok)
+                return;
+            if (!rejected)
+            {
+                napi_throw(env, error);
+                return;
+            }
+            napi_deferred deferred = nullptr;
+            if (napi_create_promise(env, &deferred, rejected) == napi_ok)
+                napi_reject_deferred(env, deferred, error);
+        }
 
+        // Accepts positional arrays or named-parameter objects.
+        // Object keys without a recognized prefix (:/$/@) get ':' prepended automatically.
+        // On an unsupported value, fails through FailParam and returns false.
+        static bool ParseParams(napi_env env, napi_value value, ParamList &result, napi_value *rejected)
+        {
             napi_valuetype type = napi_undefined;
             if (napi_typeof(env, value, &type) != napi_ok)
-                return result;
+                return true;
             if (type == napi_null || type == napi_undefined)
-                return result;
+                return true;
 
             bool isArray = false;
             if (napi_is_array(env, value, &isArray) == napi_ok && isArray)
@@ -387,20 +423,27 @@ namespace NSCSQLite
                     napi_value item = nullptr;
                     if (napi_get_element(env, value, i, &item) != napi_ok)
                         continue;
-                    result.push_back(ParseSingleParam(env, item));
+                    BoundParam p;
+                    napi_valuetype itemType;
+                    if (!ParseSingleParam(env, item, p, itemType))
+                    {
+                        FailParam(env, rejected, "at index " + std::to_string(i), itemType);
+                        return false;
+                    }
+                    result.push_back(std::move(p));
                 }
-                return result;
+                return true;
             }
 
             if (type != napi_object)
-                return result;
+                return true;
 
             napi_value names = nullptr;
             auto filter = static_cast<napi_key_filter>(napi_key_enumerable | napi_key_skip_symbols);
             if (napi_get_all_property_names(env, value, napi_key_own_only, filter,
                                             napi_key_numbers_to_strings, &names) != napi_ok)
             {
-                return result;
+                return true;
             }
 
             uint32_t count = 0;
@@ -417,15 +460,21 @@ namespace NSCSQLite
 
                 std::string name;
                 NapiHelpers::ToStdString(env, key, name);
+                BoundParam p;
+                napi_valuetype itemType;
+                if (!ParseSingleParam(env, item, p, itemType))
+                {
+                    FailParam(env, rejected, "\"" + name + "\"", itemType);
+                    return false;
+                }
                 if (name.empty() || (name[0] != ':' && name[0] != '$' && name[0] != '@'))
                 {
                     name = ':' + name;
                 }
-                BoundParam p = ParseSingleParam(env, item);
                 p.paramName = std::move(name);
                 result.push_back(std::move(p));
             }
-            return result;
+            return true;
         }
 
         //  Construction / teardown
@@ -875,7 +924,10 @@ namespace NSCSQLite
                 return closed;
 
             std::string sql = StringArg(env, call.argv[0]);
-            ParamList params = ParseParams(env, call.argv[1]);
+            ParamList params;
+            napi_value rejected = nullptr;
+            if (!ParseParams(env, call.argv[1], params, &rejected))
+                return rejected;
 
             SQLiteConnection *wdb = instance->writerDb.get();
             return Dispatch(*instance->writerDispatcher, wdb, instance, env, [wdb, sql, params = std::move(params)]() -> QueryResult
@@ -894,7 +946,10 @@ namespace NSCSQLite
                 return closed;
 
             std::string sql = StringArg(env, call.argv[0]);
-            ParamList params = ParseParams(env, call.argv[1]);
+            ParamList params;
+            napi_value rejected = nullptr;
+            if (!ParseParams(env, call.argv[1], params, &rejected))
+                return rejected;
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
@@ -914,7 +969,10 @@ namespace NSCSQLite
                 return closed;
 
             std::string sql = StringArg(env, call.argv[0]);
-            ParamList params = ParseParams(env, call.argv[1]);
+            ParamList params;
+            napi_value rejected = nullptr;
+            if (!ParseParams(env, call.argv[1], params, &rejected))
+                return rejected;
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
@@ -934,7 +992,10 @@ namespace NSCSQLite
                 return closed;
 
             std::string sql = StringArg(env, call.argv[0]);
-            ParamList params = ParseParams(env, call.argv[1]);
+            ParamList params;
+            napi_value rejected = nullptr;
+            if (!ParseParams(env, call.argv[1], params, &rejected))
+                return rejected;
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
@@ -954,7 +1015,10 @@ namespace NSCSQLite
                 return closed;
 
             std::string sql = StringArg(env, call.argv[0]);
-            ParamList params = ParseParams(env, call.argv[1]);
+            ParamList params;
+            napi_value rejected = nullptr;
+            if (!ParseParams(env, call.argv[1], params, &rejected))
+                return rejected;
 
             auto reader = NextReader(instance);
             SQLiteConnection *rdb = reader.second;
@@ -982,7 +1046,9 @@ namespace NSCSQLite
                 napi_get_value_bool(env, call.argv[2], &joinTransaction);
 
             std::string sql = StringArg(env, call.argv[0]);
-            ParamList params = ParseParams(env, call.argv[1]);
+            ParamList params;
+            if (!ParseParams(env, call.argv[1], params, nullptr))
+                return nullptr;
 
             // Read under the claim, not before it: a beginTransaction already
             // dispatched but not yet run would pass a check made out here, and
@@ -1019,7 +1085,9 @@ namespace NSCSQLite
                 return nullptr;
 
             std::string sql = StringArg(env, call.argv[0]);
-            ParamList params = ParseParams(env, call.argv[1]);
+            ParamList params;
+            if (!ParseParams(env, call.argv[1], params, nullptr))
+                return nullptr;
 
             QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
                                           { return db->execute(sql, params); });
@@ -1044,7 +1112,9 @@ namespace NSCSQLite
                 return nullptr;
 
             std::string sql = StringArg(env, call.argv[0]);
-            ParamList params = ParseParams(env, call.argv[1]);
+            ParamList params;
+            if (!ParseParams(env, call.argv[1], params, nullptr))
+                return nullptr;
 
             QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
                                           { return db->execute(sql, params); });
@@ -1069,7 +1139,9 @@ namespace NSCSQLite
                 return nullptr;
 
             std::string sql = StringArg(env, call.argv[0]);
-            ParamList params = ParseParams(env, call.argv[1]);
+            ParamList params;
+            if (!ParseParams(env, call.argv[1], params, nullptr))
+                return nullptr;
 
             QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
                                           { return db->executeGet(sql, params); });
@@ -1094,7 +1166,9 @@ namespace NSCSQLite
                 return nullptr;
 
             std::string sql = StringArg(env, call.argv[0]);
-            ParamList params = ParseParams(env, call.argv[1]);
+            ParamList params;
+            if (!ParseParams(env, call.argv[1], params, nullptr))
+                return nullptr;
 
             QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
                                           { return db->executeGet(sql, params); });
@@ -1126,7 +1200,9 @@ namespace NSCSQLite
 
             uint32_t txId = Uint32Arg(env, call.argv[0]);
             std::string sql = StringArg(env, call.argv[1]);
-            ParamList params = ParseParams(env, call.argv[2]);
+            ParamList params;
+            if (!ParseParams(env, call.argv[2], params, nullptr))
+                return nullptr;
 
             QueryResult res = RunOnWriter(instance, [&](SQLiteConnection *db)
                                           { return db->executeInTransaction(txId, sql, params); });
@@ -1152,7 +1228,9 @@ namespace NSCSQLite
 
             uint32_t txId = Uint32Arg(env, call.argv[0]);
             std::string sql = StringArg(env, call.argv[1]);
-            ParamList params = ParseParams(env, call.argv[2]);
+            ParamList params;
+            if (!ParseParams(env, call.argv[2], params, nullptr))
+                return nullptr;
 
             // Mode: 1=select, 2=selectArray — the async selectInTransaction's convention.
             int mode = Int32Arg(env, call.argv[3], 1);
@@ -1326,7 +1404,10 @@ namespace NSCSQLite
                 return closed;
 
             uint32_t stmtId = Uint32Arg(env, call.argv[0]);
-            ParamList params = ParseParams(env, call.argv[1]);
+            ParamList params;
+            napi_value rejected = nullptr;
+            if (!ParseParams(env, call.argv[1], params, &rejected))
+                return rejected;
 
             // Mode: 0=execute, 1=select, 2=selectArray, 3=get, 4=getArray
             int mode = Int32Arg(env, call.argv[2], 0);
@@ -1455,7 +1536,10 @@ namespace NSCSQLite
 
             uint32_t txId = Uint32Arg(env, call.argv[0]);
             std::string sql = StringArg(env, call.argv[1]);
-            ParamList params = ParseParams(env, call.argv[2]);
+            ParamList params;
+            napi_value rejected = nullptr;
+            if (!ParseParams(env, call.argv[2], params, &rejected))
+                return rejected;
 
             SQLiteConnection *wdb = instance->writerDb.get();
             return Dispatch(*instance->writerDispatcher, wdb, instance, env, [wdb, txId, sql, params = std::move(params)]() -> QueryResult
@@ -1475,7 +1559,10 @@ namespace NSCSQLite
 
             uint32_t txId = Uint32Arg(env, call.argv[0]);
             std::string sql = StringArg(env, call.argv[1]);
-            ParamList params = ParseParams(env, call.argv[2]);
+            ParamList params;
+            napi_value rejected = nullptr;
+            if (!ParseParams(env, call.argv[2], params, &rejected))
+                return rejected;
 
             // Mode: 1=select, 2=selectArray
             int mode = Int32Arg(env, call.argv[3], 1);

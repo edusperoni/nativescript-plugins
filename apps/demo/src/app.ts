@@ -1,10 +1,10 @@
 import { Application } from '@nativescript/core';
-import { runBenchmarks, RunBenchmarksOptions, runCorrectnessTests, RunCorrectnessTestsOptions, runEncryptedWalTest, RunEncryptedWalOptions } from '@demo/shared';
+import { runBenchmarks, RunBenchmarksOptions, runEncryptedWalTest, RunEncryptedWalOptions } from '@demo/shared';
 
 const BENCH_START_DELAY_MS = 1500;
 const BENCH_LAUNCH_FALLBACK_MS = 6000;
 
-type BenchRequest = { mode: 'full' | 'quick'; options: RunBenchmarksOptions } | { mode: 'test'; options: RunCorrectnessTestsOptions } | { mode: 'encwal'; options: RunEncryptedWalOptions };
+type BenchRequest = { mode: 'full' | 'quick'; options: RunBenchmarksOptions } | { mode: 'encwal'; options: RunEncryptedWalOptions };
 
 /** The three values each platform carries, before they are checked. */
 interface BenchArgs {
@@ -46,8 +46,8 @@ function readBenchRequest(): BenchRequest | null {
 		const args = Application.android ? readAndroidArgs() : readIOSArgs();
 		if (!args) return null;
 		const mode = args.mode;
-		if (mode !== 'full' && mode !== 'quick' && mode !== 'test' && mode !== 'encwal') return null;
-		if (mode === 'test' || mode === 'encwal') return { mode, options: { label: args.label } };
+		if (mode !== 'full' && mode !== 'quick' && mode !== 'encwal') return null;
+		if (mode === 'encwal') return { mode, options: { label: args.label } };
 		return {
 			mode,
 			options: {
@@ -69,11 +69,10 @@ function scheduleBench() {
 		const request = readBenchRequest();
 		if (!request) return;
 		let run: Promise<unknown>;
-		if (request.mode === 'test') run = runCorrectnessTests(request.options);
-		else if (request.mode === 'encwal') run = runEncryptedWalTest(request.options);
+		if (request.mode === 'encwal') run = runEncryptedWalTest(request.options);
 		else run = runBenchmarks(request.options);
 		run.catch(() => {
-			/* the runner already logged its [NSCBENCH_ERROR]/[NSCTEST_ERROR]/[NSCENCWAL_ERROR] line */
+			/* the runner already logged its [NSCBENCH_ERROR]/[NSCENCWAL_ERROR] line */
 		});
 	}, BENCH_START_DELAY_MS);
 }
