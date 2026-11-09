@@ -274,6 +274,15 @@ namespace NSCSQLite
                 p.type = ColumnType::Integer;
                 p.intValue = item->BooleanValue(isolate) ? 1 : 0;
             }
+            else if (item->IsBigInt())
+            {
+                bool lossless = false;
+                int64_t value = item.As<v8::BigInt>()->Int64Value(&lossless);
+                if (!lossless)
+                    return false;
+                p.type = ColumnType::Integer;
+                p.intValue = value;
+            }
             else if (item->IsNullOrUndefined())
             {
                 p.type = ColumnType::Null;
@@ -304,9 +313,18 @@ namespace NSCSQLite
         static void FailParam(v8::Isolate *isolate, v8::Local<v8::Promise::Resolver> resolver,
                               const std::string &which, v8::Local<v8::Value> item)
         {
-            std::string message = "Cannot bind parameter " + which + ": unsupported value of type " +
-                                  V8Helpers::FromV8String(isolate, item->TypeOf(isolate));
-            auto error = v8::Exception::TypeError(V8Helpers::ToV8String(isolate, message));
+            v8::Local<v8::Value> error;
+            if (item->IsBigInt())
+            {
+                std::string message = "Cannot bind parameter " + which + ": bigint is outside the 64-bit integer range";
+                error = v8::Exception::RangeError(V8Helpers::ToV8String(isolate, message));
+            }
+            else
+            {
+                std::string message = "Cannot bind parameter " + which + ": unsupported value of type " +
+                                      V8Helpers::FromV8String(isolate, item->TypeOf(isolate));
+                error = v8::Exception::TypeError(V8Helpers::ToV8String(isolate, message));
+            }
             if (resolver.IsEmpty())
                 isolate->ThrowException(error);
             else

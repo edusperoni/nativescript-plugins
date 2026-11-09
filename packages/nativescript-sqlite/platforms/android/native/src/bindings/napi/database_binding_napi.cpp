@@ -337,8 +337,9 @@ namespace NSCSQLite
 
         // Discriminating order mirrors the column types SQLite can bind: Number
         // (Integer or Float, see SetNumberParam), String,
-        // Boolean, null/undefined → Null, buffers and views → Blob.  Returns false
-        // for anything else, with `type` set for the error message.
+        // Boolean, bigint within 64 bits → Integer, null/undefined → Null, buffers and
+        // views → Blob.  Returns false for anything else, with `type` set for the error
+        // message.
         static bool ParseSingleParam(napi_env env, napi_value item, BoundParam &p, napi_valuetype &type)
         {
             type = napi_undefined;
@@ -366,6 +367,16 @@ namespace NSCSQLite
                 p.intValue = flag ? 1 : 0;
                 return true;
             }
+            case napi_bigint:
+            {
+                int64_t value = 0;
+                bool lossless = false;
+                if (napi_get_value_bigint_int64(env, item, &value, &lossless) != napi_ok || !lossless)
+                    return false;
+                p.type = ColumnType::Integer;
+                p.intValue = value;
+                return true;
+            }
             case napi_null:
             case napi_undefined:
                 p.type = ColumnType::Null;
@@ -386,11 +397,19 @@ namespace NSCSQLite
         // gets a promise already rejected with the error.
         static void FailParam(napi_env env, napi_value *rejected, const std::string &which, napi_valuetype type)
         {
-            std::string message = "Cannot bind parameter " + which + ": unsupported value of type " + TypeName(type);
-            napi_value msg = NapiHelpers::String(env, message);
             napi_value error = nullptr;
-            if (napi_create_type_error(env, nullptr, msg, &error) != napi_ok)
-                return;
+            if (type == napi_bigint)
+            {
+                std::string message = "Cannot bind parameter " + which + ": bigint is outside the 64-bit integer range";
+                if (napi_create_range_error(env, nullptr, NapiHelpers::String(env, message), &error) != napi_ok)
+                    return;
+            }
+            else
+            {
+                std::string message = "Cannot bind parameter " + which + ": unsupported value of type " + TypeName(type);
+                if (napi_create_type_error(env, nullptr, NapiHelpers::String(env, message), &error) != napi_ok)
+                    return;
+            }
             if (!rejected)
             {
                 napi_throw(env, error);

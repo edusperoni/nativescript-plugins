@@ -50,10 +50,11 @@ export const SQLITE_NULL = 5;
 export type SQLiteValue = string | number | boolean | null | ArrayBuffer;
 /**
  * A value that can be bound as a query parameter. `undefined` binds as NULL.
- * Buffers and views bind as a BLOB of the view's own bytes. Any other value
- * throws a TypeError naming the parameter.
+ * A bigint binds as a 64-bit INTEGER and throws a RangeError when it does not
+ * fit. Buffers and views bind as a BLOB of the view's own bytes. Any other
+ * value throws a TypeError naming the parameter.
  */
-export type SQLiteBindValue = string | number | boolean | null | undefined | ArrayBufferLike | ArrayBufferView;
+export type SQLiteBindValue = string | number | bigint | boolean | null | undefined | ArrayBufferLike | ArrayBufferView;
 export type SQLiteParams = SQLiteBindValue[] | Record<string, SQLiteBindValue>;
 export type SQLiteRow = Record<string, SQLiteValue>;
 
