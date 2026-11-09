@@ -1,14 +1,17 @@
 #pragma once
 
 // ---------------------------------------------------------------------------
-// NapiRuntimeAdapter — Layer 1: Node-API implementation of RuntimeAdapter.
+// NapiRuntimeAdapter — Layer 1: converts native result structs to JS values
+// and settles promises.
 //
 // promiseCtx is a napi_deferred; returnCtx is a NapiReturn.
 // Every method runs on the thread that owns the env.
 // ---------------------------------------------------------------------------
 
-#include "../runtime_adapter.h"
+#include "../../common/sqlite_types.h"
 #include <node_api.h>
+#include <cstdint>
+#include <string>
 
 namespace NSCSQLite {
 
@@ -18,10 +21,10 @@ struct NapiReturn {
     napi_value value{nullptr};
 };
 
-class NapiRuntimeAdapter : public RuntimeAdapter {
+class NapiRuntimeAdapter {
 public:
     NapiRuntimeAdapter() = default;
-    ~NapiRuntimeAdapter() override = default;
+    ~NapiRuntimeAdapter() = default;
 
     NapiRuntimeAdapter(const NapiRuntimeAdapter&)            = delete;
     NapiRuntimeAdapter& operator=(const NapiRuntimeAdapter&) = delete;
@@ -31,20 +34,20 @@ public:
 
     napi_env env() const { return env_; }
 
-    void resolveWithRows(void* promiseCtx, const QueryResult& result) override;
-    void resolveWithFirstRow(void* promiseCtx, const QueryResult& result) override;
-    void resolveWithArrayResult(void* promiseCtx, const QueryResult& result) override;
-    void resolveWithFirstArrayRow(void* promiseCtx, const QueryResult& result) override;
-    void resolveVoid(void* promiseCtx) override;
-    void resolveWithId(void* promiseCtx, uint32_t id) override;
-    void resolveWithRuntimeInfo(void* promiseCtx, const RuntimeInfo& info) override;
-    void reject(void* promiseCtx, const std::string& message, int code) override;
+    void resolveWithRows(void* promiseCtx, const QueryResult& result);
+    void resolveWithFirstRow(void* promiseCtx, const QueryResult& result);
+    void resolveWithArrayResult(void* promiseCtx, const QueryResult& result);
+    void resolveWithFirstArrayRow(void* promiseCtx, const QueryResult& result);
+    void resolveVoid(void* promiseCtx);
+    void resolveWithId(void* promiseCtx, uint32_t id);
+    void resolveWithRuntimeInfo(void* promiseCtx, const RuntimeInfo& info);
+    void reject(void* promiseCtx, const std::string& message, int code);
 
-    void returnRows(void* returnCtx, const QueryResult& result) override;
-    void returnFirstRow(void* returnCtx, const QueryResult& result) override;
-    void returnArrayResult(void* returnCtx, const QueryResult& result) override;
-    void returnFirstArrayRow(void* returnCtx, const QueryResult& result) override;
-    void returnVoid(void* returnCtx) override;
+    void returnRows(void* returnCtx, const QueryResult& result);
+    void returnFirstRow(void* returnCtx, const QueryResult& result);
+    void returnArrayResult(void* returnCtx, const QueryResult& result);
+    void returnFirstArrayRow(void* returnCtx, const QueryResult& result);
+    void returnVoid(void* returnCtx);
 
     // Structured path, shared by the sync methods and the non-JSON fallback.
     napi_value columnToValue(const ColumnValue& column);

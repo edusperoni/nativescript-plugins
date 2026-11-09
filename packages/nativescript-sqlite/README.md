@@ -743,7 +743,7 @@ The rest of this section is about changing that: turning on encryption, adding c
 
 ### Requirements
 
-- **`@nativescript/android` 9.1 or newer** for the default Node-API backend. Older runtimes need `nscsqlite.backend=v8`; see [Backends](#backends).
+- **`@nativescript/android` 9.1 or newer.** The plugin's native library binds to the runtime through Node-API, which earlier versions do not provide.
 - **NDK and CMake** — both come with the Android toolchain NativeScript already installs and configures. Nothing extra to install.
 - **Network access on the first build.** The SQLite amalgamation is downloaded rather than vendored, pinned by URL and SHA-256 in `platforms/android/native/downloads.properties` and verified before anything is extracted. It is cached under `<gradle user home>/nscsqlite` — `~/.gradle/nscsqlite` unless you moved `GRADLE_USER_HOME` — and reused by every later build and every project on the machine. To build with no network at all, see [Offline and CI builds](#offline-and-ci-builds).
 
@@ -859,18 +859,16 @@ Precedence is **`-P` property → environment variable → default**, so an envi
 >
 > For anything more, use `gradle.properties` or the environment variables. The environment is also the only route for a scripted build, because Gradle refuses `-P` property names containing a dot when they arrive that way — which is why these variables exist at all.
 
-Whichever route you take, the build log line beginning `nscsqlite: backend=… sqlite=…` reports what was actually selected.
+Whichever route you take, the build log line beginning `nscsqlite: sqlite=…` reports what was actually selected.
 
 #### All properties
 
 | property | environment variable | values | default | meaning |
 |---|---|---|---|---|
-| `nscsqlite.backend` | `NSCSQLITE_BACKEND` | `napi` \| `v8` | `napi` | Which JS binding the native library is built against. |
 | `nscsqlite.sqlite` | `NSCSQLITE_SQLITE` | `bundled` \| `sqlite3mc` | `bundled` | Which built-in preset to compile. `nscsqlite.sqliteImpl` is accepted as an alias for backwards compatibility. |
 | `nscsqlite.sqliteProjectDir` | `NSCSQLITE_SQLITE_PROJECT_DIR` | path | — | An app-provided CMake directory. Absolute paths are used as-is; a relative path resolves against the app root (the directory holding the app's `package.json`). |
 | `nscsqlite.sqliteFlags` | `NSCSQLITE_SQLITE_FLAGS` | `;`-separated defines | — | Extra compile definitions, additive on top of the preset's defaults. |
 | `nscsqlite.sqliteSourceDir` | `NSCSQLITE_SQLITE_SOURCE_DIR` | path | — | A directory holding an already-extracted amalgamation for the selected preset; skips the download. |
-| `nscsqlite.v8IncludeDir` | `NSCSQLITE_V8_INCLUDE_DIR` | path | — | Pre-extracted V8 headers; skips that download. Only relevant to the `v8` backend. |
 | `nscsqlite.cacheDir` | `NSCSQLITE_CACHE_DIR` | path | `<gradle user home>/nscsqlite` | Download cache root. |
 
 ### Bringing your own SQLite
@@ -943,21 +941,9 @@ Five complete `CMakeLists.txt` files, each with a page on what it does and what 
 
 One thing to know before reaching for the last one: the plugin does **not** expose a raw `SQLITE_EXTRA_INIT` pass-through for the built-in presets, and that is on purpose. SQLCipher's guard is `#if !defined(SQLITE_EXTRA_INIT)` — it tests that the macro *exists*, not what it names — so a user-supplied value silently displaces `sqlcipher_extra_init`, the build succeeds, and the crypto provider is never registered. Statically linked extensions for the built-in presets are out of scope for this release; they go through the app-provided directory.
 
-### Backends
-
-The plugin's native library binds to the JavaScript engine through one of two backends. **Both expose an identical JavaScript API** — nothing in the rest of this README changes between them.
-
-**`napi` (default).** Binds through Node-API. It needs no V8 headers and downloads none, and it is insulated from V8 changes inside the runtime. Requires `@nativescript/android` 9.1 or newer.
-
-**`v8`.** Binds through the raw V8 C++ API, kept as a reference and benchmark implementation. It compiles against V8's public headers, which the build downloads and pins to match the runtime's V8 (`platforms/android/native/downloads.properties`). Because it reaches into V8 directly, **it is tied to the V8 version inside `@nativescript/android` and has to be rebuilt when that changes**; a mismatch is not a build error.
-
-```properties
-nscsqlite.backend=v8
-```
-
 ### Offline and CI builds
 
-The build downloads two things: the SQLite amalgamation for the selected preset, and — on the `v8` backend only — the V8 public headers. Both are pinned by URL and SHA-256 and cached; a machine that has built once needs no network again.
+The build downloads one thing: the SQLite amalgamation for the selected preset. It is pinned by URL and SHA-256 and cached; a machine that has built once needs no network again.
 
 To move the cache:
 
@@ -967,18 +953,16 @@ nscsqlite.cacheDir=/var/cache/nscsqlite
 
 Point it at a directory your CI restores between runs and the downloads happen once, ever.
 
-To skip the downloads entirely — an air-gapped builder, or a vendored copy under version control — supply the extracted trees:
+To skip the downloads entirely — an air-gapped builder, or a vendored copy under version control — supply the extracted tree:
 
 ```properties
 # A directory holding the already-extracted amalgamation for the selected preset
 nscsqlite.sqliteSourceDir=/opt/vendor/sqlite-amalgamation-3530100
-# Only needed on the v8 backend
-nscsqlite.v8IncludeDir=/opt/vendor/v8/include
 ```
 
 `nscsqlite.sqliteSourceDir` must match the preset you selected: the `bundled` preset expects an upstream amalgamation, `sqlite3mc` expects a SQLite3MultipleCiphers one. The pinned URLs and checksums are in `platforms/android/native/downloads.properties` if you want to fetch and verify them yourself.
 
-An [app-provided directory](#bringing-your-own-sqlite) needs no SQLite download at all — your sources are already on disk. On the `v8` backend the V8 headers are still fetched.
+An [app-provided directory](#bringing-your-own-sqlite) needs no SQLite download at all — your sources are already on disk.
 
 ### Troubleshooting
 
@@ -996,17 +980,17 @@ Both values are retired and the build says so rather than quietly doing somethin
 - `sqlcipher` → use `sqlite3mc`, which writes the same SQLCipher 4 files and needs no OpenSSL. If you need SQLCipher itself, use the [app-provided directory](#bringing-your-own-sqlite) and the [LibTomCrypt example](docs/android-custom-sqlite/sqlcipher-libtomcrypt).
 - `custom` → use the app-provided directory with an `IMPORTED` target: the [prebuilt example](docs/android-custom-sqlite/prebuilt-imported). The old `nscsqlite.sqliteIncludeDir`, `nscsqlite.sqliteLibDir` and `nscsqlite.sqliteLibName` properties are gone with it; `find_library` could never see the app's directory under the NDK toolchain, so that mode did not actually work.
 
+**`nscsqlite.backend=v8` fails the build**
+
+The V8 backend has been removed; the plugin binds through Node-API only, which needs `@nativescript/android` 9.1 or newer. Remove `nscsqlite.backend` (or `NSCSQLITE_BACKEND`); any other value of it is ignored.
+
 **`openDatabase` fails with "the linked SQLite was built with SQLITE_THREADSAFE=0"**
 
 Checked at the first open, because a single-threaded SQLite cannot back a connection pool. Rebuild your engine with `SQLITE_THREADSAFE=2`; both presets already set it and it is not overridable there.
 
-**The app crashes or misbehaves on the `v8` backend after a runtime upgrade**
-
-The `v8` backend compiles against V8's public headers and must match the V8 inside `@nativescript/android`. Nothing checks this at build time. Clear the header cache under `<gradle user home>/nscsqlite`, rebuild, and if the mismatch persists switch to the default `napi` backend, which is not exposed to V8's internals.
-
 **`openDatabase()` throws "this build uses the bundled SQLite, which cannot encrypt"**
 
-You passed an `encryptionKey` to a build using the `bundled` preset, which has no codec. The plugin refuses (with `SQLITE_MISUSE`) rather than writing a plaintext database. Set `nscsqlite.sqlite=sqlite3mc`, or supply an engine that encrypts. If you thought you had already set the property, check the build log line `nscsqlite: backend=… sqlite=…` and the entry below.
+You passed an `encryptionKey` to a build using the `bundled` preset, which has no codec. The plugin refuses (with `SQLITE_MISUSE`) rather than writing a plaintext database. Set `nscsqlite.sqlite=sqlite3mc`, or supply an engine that encrypts. If you thought you had already set the property, check the build log line `nscsqlite: sqlite=…` and the entry below.
 
 **`openDatabase()` throws `SQLITE_NOTADB` (code 26) on an existing database**
 
@@ -1018,7 +1002,7 @@ Possible on any engine the plugin did not compile itself — the `sqlite3mc` pre
 
 **A property passed on the command line had no effect**
 
-`--gradleArgs` carries exactly one property, and only with the `=` form. `--gradleArgs=-Pa=1 -Pb=2` reaches Gradle as one property `a` with the value `1 -Pb=2`; `--gradleArgs -Pa=1` is dropped entirely. Put app configuration in `App_Resources/Android/gradle.properties`, or use the `NSCSQLITE_*` environment variables for scripted builds. The build log line beginning `nscsqlite: backend=… sqlite=…` tells you what was actually selected.
+`--gradleArgs` carries exactly one property, and only with the `=` form. `--gradleArgs=-Pa=1 -Pb=2` reaches Gradle as one property `a` with the value `1 -Pb=2`; `--gradleArgs -Pa=1` is dropped entirely. Put app configuration in `App_Resources/Android/gradle.properties`, or use the `NSCSQLITE_*` environment variables for scripted builds. The build log line beginning `nscsqlite: sqlite=…` tells you what was actually selected.
 
 ## Encryption Caveats
 

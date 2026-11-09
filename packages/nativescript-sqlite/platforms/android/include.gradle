@@ -9,10 +9,11 @@ def prop = { String name, String env, String fallback = null ->
     (value == null || value.isEmpty()) ? fallback : value
 }
 
-def backend = prop('nscsqlite.backend', 'NSCSQLITE_BACKEND', 'napi')
-
-if (backend != 'v8' && backend != 'napi') {
-    throw new GradleException("nscsqlite.backend must be 'v8' or 'napi', got '${backend}'")
+if (prop('nscsqlite.backend', 'NSCSQLITE_BACKEND')?.equalsIgnoreCase('v8')) {
+    throw new GradleException(
+        "nscsqlite.backend=v8 is no longer supported: the V8 backend has been removed and " +
+        "the plugin binds through Node-API only, which needs @nativescript/android 9.1 or " +
+        "newer. Remove nscsqlite.backend (or the NSCSQLITE_BACKEND environment variable).")
 }
 
 def sqlite = prop('nscsqlite.sqlite', 'NSCSQLITE_SQLITE',
@@ -199,21 +200,6 @@ new File(pluginNativeDir, "downloads.properties").withInputStream { downloadPins
 def cacheRoot = new File(prop('nscsqlite.cacheDir', 'NSCSQLITE_CACHE_DIR')
                          ?: new File(project.gradle.gradleUserHomeDir, "nscsqlite").path)
 
-def v8IncludeDir = null
-if (backend == 'v8') {
-    def override = prop('nscsqlite.v8IncludeDir', 'NSCSQLITE_V8_INCLUDE_DIR')
-    if (override != null) {
-        v8IncludeDir = new File(override)
-        if (!new File(v8IncludeDir, "v8.h").exists()) {
-            throw new GradleException(
-                "nscsqlite.v8IncludeDir=${v8IncludeDir} does not contain v8.h")
-        }
-    } else {
-        v8IncludeDir = new File(
-            resolveArtifact(project, cacheRoot, downloadPins, 'v8-headers'), "include")
-    }
-}
-
 def sqliteSourceDir = null
 if (sqliteProjectDir == null) {
     def override = prop('nscsqlite.sqliteSourceDir', 'NSCSQLITE_SQLITE_SOURCE_DIR')
@@ -242,7 +228,7 @@ def findNsAndroidDir(project) {
 def nsStubsDir = null
 def nsAndroidDir = findNsAndroidDir(project)
 if (nsAndroidDir) {
-    // Any runtime flavor exports the public V8 API, and the stub is only ever a
+    // Any runtime flavor exports Node-API, and the stub is only ever a
     // link-time input, so prefer the smallest one that is present.
     def runtimeLibsDir = new File(nsAndroidDir, "framework/app/libs/runtime-libs")
     def aarFile = ['nativescript-optimized.aar',
@@ -279,7 +265,6 @@ if (nsAndroidDir) {
 }
 
 def cmakeArgs = [
-    "-DNSCSQLITE_BACKEND=${backend}",
     "-DNSCSQLITE_SQLITE=${sqliteProjectDir != null ? 'project' : sqlite}",
     "-DNSCSQLITE_SQLITE_FLAGS=${sqliteFlags}"
 ]
@@ -288,10 +273,6 @@ if (sqliteProjectDir != null) {
     cmakeArgs << "-DNSCSQLITE_SQLITE_PROJECT_DIR=${sqliteProjectDir.absolutePath}"
 } else {
     cmakeArgs << "-DNSCSQLITE_SQLITE_SOURCE_DIR=${sqliteSourceDir.absolutePath}"
-}
-
-if (v8IncludeDir) {
-    cmakeArgs << "-DV8_INCLUDE_DIR=${v8IncludeDir.absolutePath}"
 }
 
 if (nsStubsDir) {
@@ -313,11 +294,9 @@ android {
         }
     }
 
-    // The napi backend takes its Node-API headers from the runtime AAR's
-    // header-only Prefab package.
-    if (backend == 'napi') {
-        buildFeatures {
-            prefab true
-        }
+    // The Node-API headers come from the runtime AAR's header-only Prefab
+    // package.
+    buildFeatures {
+        prefab true
     }
 }

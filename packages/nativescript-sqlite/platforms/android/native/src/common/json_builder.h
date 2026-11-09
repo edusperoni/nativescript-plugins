@@ -4,7 +4,7 @@
 // JSONBuilder — fast, allocation-minimal JSON string construction.
 //
 // Ported from the iOS NSSQLiteDatabase implementation.  Runs on worker
-// threads (pure C++, no V8, no JNI).  Builds UTF-8 JSON into a
+// threads (pure C++, no Node-API, no JNI).  Builds UTF-8 JSON into a
 // pre-allocated string buffer, escaping only the characters that JSON
 // requires.
 //
@@ -14,7 +14,7 @@
 //
 // Blobs are passed out-of-band: a placeholder object {"__blob__":N} is
 // written into the JSON, where N is the 0-based index into the companion
-// blob vector.  The JS / V8 side replaces these after JSON.parse().
+// blob vector.  The JS side replaces these after JSON.parse().
 // ---------------------------------------------------------------------------
 
 #include <cstdint>

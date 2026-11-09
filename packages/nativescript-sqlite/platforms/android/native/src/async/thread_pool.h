@@ -2,7 +2,7 @@
 
 // ---------------------------------------------------------------------------
 // ThreadPool — Layer 2: Worker thread management.
-// NO V8, NO JNI.  Tasks submitted here MUST NOT touch V8.
+// NO Node-API, NO JNI.  Tasks submitted here MUST NOT touch Node-API.
 //
 // Exactly one task runs at a time, counting the inline work the JS thread runs
 // through runInline() / acquireInline(): the pool is the serialization point

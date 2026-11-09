@@ -7,7 +7,7 @@
 #include <variant>
 
 // ---------------------------------------------------------------------------
-// Runtime-agnostic types — NO V8 / NO JNI anywhere in this file.
+// Runtime-agnostic types — NO Node-API / NO JNI anywhere in this file.
 // Worker threads produce these; the runtime thread converts them to JS values.
 // ---------------------------------------------------------------------------
 
@@ -60,7 +60,7 @@ namespace NSCSQLite
 
         // --- JSON fast path (async API) ------------------------------------------
         // Built on the worker thread by runStatementAsJson(); consumed on the JS
-        // thread via v8::JSON::Parse() + blob hydration.
+        // thread via JSON.parse() + blob hydration.
         // jsonRows format depends on the query variant:
         //   select / get       → "[{\"col\":val,...}, ...]"
         //   selectArray        → "{\"columns\":[...],\"rows\":[[...],...]}"
@@ -69,7 +69,7 @@ namespace NSCSQLite
     };
 
     // -- Bound parameter ---------------------------------------------------------
-    // Params are extracted from V8 on the runtime thread, then passed to workers.
+    // Params are extracted from JS values on the runtime thread, then passed to workers.
 
     struct BoundParam
     {
