@@ -1072,7 +1072,7 @@ async function encryptionWorks(): Promise<boolean> {
 }
 ```
 
-This is what the plugin's own demo test suite uses to decide whether to run its encryption tests (`tools/demo/nativescript-sqlite/test-suite/index.ts`). Note the cost: it performs a keyed open, which on a passphrase is not free — see [The cost of a passphrase](#the-cost-of-a-passphrase). Run it once, at first launch or in a debug build, and cache the answer; do not run it on every start.
+This is what the plugin's own test specs use to decide whether to run their encryption tests (`hasSQLCipher()` in `apps/demo/src/tests/sqlite/helpers.ts`). Note the cost: it performs a keyed open, which on a passphrase is not free — see [The cost of a passphrase](#the-cost-of-a-passphrase). Run it once, at first launch or in a debug build, and cache the answer; do not run it on every start.
 
 ### The engine-specific assertion
 

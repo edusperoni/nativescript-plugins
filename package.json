@@ -36,6 +36,7 @@
 		"@nativescript/types": "~9.1.4",
 		"@nativescript/webpack": "~5.0.39",
 		"@ngtools/webpack": "^19.0.0",
+		"@types/jasmine": "~3.10.0",
 		"@typescript-eslint/eslint-plugin": "8.56.1",
 		"@typescript-eslint/parser": "8.56.1",
 		"drizzle-orm": "^0.45.2",
